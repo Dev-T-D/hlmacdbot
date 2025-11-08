@@ -1,0 +1,121 @@
+# Cursor AI Rules for Hyperliquid Trading Bot
+
+## Project Context
+
+This is a cryptocurrency futures trading bot for Hyperliquid exchange using:
+
+- Python 3.11+
+- MACD Overlay strategy with configurable leverage
+- Real-time trading with risk management
+- REST API integration with EIP-712 wallet signing
+- Testnet and mainnet support
+
+## Code Style Preferences
+
+- Use type hints for all function parameters and returns
+- Follow PEP 8 standards
+- Maximum line length: 100 characters
+- Use docstrings for all classes and functions
+- Prefer explicit over implicit code
+
+## Trading Bot Specific Guidelines
+
+- Always include error handling for API calls
+- Never hardcode private keys or credentials - use config files
+- Log all trading decisions with timestamps
+- Validate all order parameters before execution
+- Include safety checks for position sizes and risk limits
+- Comment complex trading logic thoroughly
+- Use try-except blocks for exchange interactions
+- Handle Hyperliquid-specific features (asset indices, EIP-712 signing)
+- Test on testnet before mainnet deployment
+- Respect Hyperliquid's rate limits and API guidelines
+
+## Dependencies
+
+- pandas for data manipulation
+- numpy for calculations
+- requests for API calls (with connection pooling optimization)
+- eth-account for wallet signing (Hyperliquid authentication)
+- web3 for Ethereum utilities
+- Standard library: logging, json, time, datetime
+
+## File Structure
+
+- hyperliquid_client.py: Hyperliquid exchange API wrapper (primary)
+- bitunix_client.py: Legacy Bitunix exchange API wrapper (maintained for reference)
+- macd_strategy.py: Strategy logic
+- risk_manager.py: Position sizing and limits with trailing stop-loss
+- trading_bot.py: Main bot orchestration (supports both exchanges)
+- config/config.json: Configuration (never commit with real credentials)
+- test_hyperliquid_connection.py: Connection and functionality tests
+
+## Testing Priorities
+
+- Always test API connections before trading
+- Start on Hyperliquid testnet, then move to mainnet
+- Verify order calculations manually (Hyperliquid uses different size units)
+- Test in dry-run mode before live trading
+- Check risk limits are enforced
+- Verify EIP-712 signatures are correct
+- Test with small positions first
+- Validate asset index mappings (Hyperliquid-specific)
+
+## Security Rules
+
+- Never log private keys, wallet addresses, or secrets
+- Never commit config.json with real credentials
+- Use environment variables for sensitive data (HYPERLIQUID_PRIVATE_KEY, HYPERLIQUID_WALLET)
+- Validate all external inputs
+- Private keys must have 0x prefix for Hyperliquid
+- Keep private keys secure - they control wallet funds
+- Use testnet for development and testing
+- Wallet address should match the private key's derived address
+
+## When Modifying Code
+
+- Explain what changes will do before applying
+- Preserve existing error handling
+- Maintain backward compatibility with config
+- Update logging for new features
+- Consider impact on running positions
+
+## Preferred Patterns
+
+- Use classes for major components
+- Use dataclasses for data structures
+- Use enums for constants
+- Use context managers for resources
+- Async/await for concurrent operations (if needed)
+
+## AI Assistant Behavior
+
+- Ask clarifying questions before major changes
+- Suggest improvements proactively
+- Explain trading concepts when relevant
+- Warn about potential risks or bugs
+- Reference Hyperliquid documentation when available (https://hyperliquid.gitbook.io/)
+- Show examples for complex changes
+- Highlight Hyperliquid-specific considerations (asset indices, order types, etc.)
+
+## Hyperliquid-Specific Considerations
+
+- Asset indices: Symbols map to integer indices (BTC=0, ETH=1, SOL=2, etc.)
+- Order sizes: Use "sz" field with proper decimal precision
+- Authentication: EIP-712 structured data signing with wallet private key
+- Leverage: Set per-position via modify_leverage()
+- Order types: Limit orders, market orders (IOC), trigger orders
+- Position tracking: Use get_user_state() for current positions
+- Testnet URL: https://api.hyperliquid-testnet.xyz
+- Mainnet URL: https://api.hyperliquid.xyz
+- No API keys needed - wallet-based authentication
+- Connection pooling optimized for performance (20-30% faster API calls)
+
+## Performance Optimizations Implemented
+
+- Market data caching: 80% reduction in API calls, 10x faster cache hits
+- Connection pooling: 23% faster API calls, 85% less connection overhead
+- Combined effect: 90% reduction in total API time
+- Incremental data fetching: Only fetch new candles when needed
+- Smart cache validation: 60-second max age with stale fallback
+

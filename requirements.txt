@@ -1,0 +1,30 @@
+pandas==2.3.3
+numpy==2.3.4
+requests==2.31.0
+python-dateutil==2.8.2
+
+# Hyperliquid dependencies (for wallet-based signing)
+eth-account>=0.10.0
+web3>=6.0.0
+eth-utils>=2.0.0
+
+# Optional: Official Hyperliquid Python SDK (not required for this bot)
+# hyperliquid-python-sdk>=0.3.0
+# GitHub: https://github.com/hyperliquid-dex/hyperliquid-python-sdk
+# Note: This bot uses a custom implementation for interface compatibility
+
+# Optional: Health monitor endpoint (requires Flask)
+# flask>=2.0.0
+# Install with: pip install flask
+
+# Optional: Secure credential storage (requires keyring)
+# keyring>=23.0.0
+# Install with: pip install keyring
+# Note: Falls back to environment variables/config file if not installed
+
+# Secure key storage (for in-memory encryption)
+cryptography>=41.0.0
+
+# WebSocket support for real-time data (optional)
+websockets>=12.0
+
