@@ -66,6 +66,7 @@ from input_sanitizer import InputSanitizer
 from macd_strategy import MACDStrategy
 from order_flow_analyzer import OrderFlowAnalyzer
 from smart_order_router import SmartOrderRouter
+from ml_signal_enhancer import MLSignalEnhancer
 from order_tracker import OrderStatus, OrderTracker
 from risk_manager import RiskManager, TrailingStopLoss
 
@@ -346,6 +347,20 @@ class TradingBot:
             order_flow_analyzer=self.order_flow_analyzer,
             config=self.config.get("smart_routing", {})
         )
+
+        # Initialize ML signal enhancer
+        ml_config = self.config.get("ml_enhancement", {})
+        self.ml_enhancer = MLSignalEnhancer(
+            symbol=self.symbol,
+            config=ml_config
+        )
+
+        # Try to load ML models
+        self.ml_enabled = self.ml_enhancer.load_models()
+        if self.ml_enabled:
+            logger.info("✅ ML signal enhancement enabled")
+        else:
+            logger.warning("⚠️ ML models not available - using traditional signals")
 
         # Sanitize risk parameters
         leverage = InputSanitizer.sanitize_leverage(self.config["risk"]["leverage"], exchange)
@@ -1832,7 +1847,7 @@ class TradingBot:
 
             # Calculate position size, accounting for existing positions
             existing_positions = [self.current_position] if self.current_position else []
-            size_info = self.risk_manager.calculate_position_size(
+            base_size_info = self.risk_manager.calculate_position_size(
                 balance=balance,
                 entry_price=entry_price,
                 stop_loss=stop_loss,
@@ -1840,6 +1855,27 @@ class TradingBot:
                 qty_precision=QUANTITY_PRECISION,
                 existing_positions=existing_positions,
             )
+
+            # Apply ML-based position size adjustment if available
+            ml_multiplier = signal.get('position_size_multiplier', 1.0)
+            if ml_multiplier != 1.0:
+                adjusted_quantity = base_size_info['quantity'] * ml_multiplier
+                # Ensure we don't exceed maximum position size
+                max_qty = base_size_info.get('max_quantity', base_size_info['quantity'] * 2)
+                adjusted_quantity = min(adjusted_quantity, max_qty)
+                # Ensure we meet minimum quantity
+                adjusted_quantity = max(adjusted_quantity, MIN_QUANTITY)
+
+                # Update size_info with ML-adjusted quantity
+                size_info = base_size_info.copy()
+                size_info['quantity'] = adjusted_quantity
+                size_info['notional_value'] = adjusted_quantity * entry_price
+                size_info['position_risk'] = abs(entry_price - stop_loss) * adjusted_quantity
+
+                logger.info(f"ML-adjusted position size: {base_size_info['quantity']:.4f} -> "
+                           f"{adjusted_quantity:.4f} ({ml_multiplier:.1f}x multiplier)")
+            else:
+                size_info = base_size_info
 
             # Validate order (may raise OrderValidationError)
             try:
@@ -2332,6 +2368,90 @@ class TradingBot:
             logger.warning(f"Error in microstructure signal enhancement: {e}")
             return signal  # Return original signal on error
 
+    def _enhance_signal_with_ml(self, signal: Dict, df: pd.DataFrame) -> Optional[Dict]:
+        """
+        Enhance trading signal with ML model predictions.
+
+        Args:
+            signal: Enhanced signal from microstructure analysis
+            df: Market data DataFrame with indicators
+
+        Returns:
+            ML-enhanced signal dict or None if signal is rejected
+        """
+        try:
+            # Get current market state for ML prediction
+            current_price = df.iloc[-1]["close"]
+
+            # Prepare market data for ML (last 100 candles for context)
+            market_data = df.iloc[-100:].copy() if len(df) >= 100 else df.copy()
+
+            # Get order book and trade flow data
+            orderbook_data = None
+            trade_flow_data = None
+
+            try:
+                orderbook_data = self.client.get_orderbook(self.symbol, depth=20)
+            except Exception as e:
+                logger.debug(f"Could not get orderbook for ML: {e}")
+
+            try:
+                trade_flow_data = {
+                    'net_flow_5m': self.order_flow_analyzer.trade_flow_metrics.net_flow_5m if self.order_flow_analyzer.trade_flow_metrics else 0,
+                    'aggression_ratio': self.order_flow_analyzer.trade_flow_metrics.aggression_ratio if self.order_flow_analyzer.trade_flow_metrics else 1.0,
+                    'buy_pressure': self.order_flow_analyzer.trade_flow_metrics.buy_pressure if self.order_flow_analyzer.trade_flow_metrics else 0.5,
+                    'large_trades_count': self.order_flow_analyzer.trade_flow_metrics.large_trades_count if self.order_flow_analyzer.trade_flow_metrics else 0
+                }
+            except Exception as e:
+                logger.debug(f"Could not get trade flow for ML: {e}")
+
+            # Get ML prediction
+            ml_prediction = self.ml_enhancer.predict_direction(
+                market_data=market_data,
+                orderbook_data=orderbook_data,
+                trade_flow_data=trade_flow_data,
+                funding_rates=None  # Could be added later
+            )
+
+            # Check if ML agrees with the signal
+            macd_signal = signal.get('type', '')
+            should_trade, enhanced_info = self.ml_enhancer.should_trade(
+                macd_signal=macd_signal,
+                ml_prediction=ml_prediction,
+                current_price=current_price
+            )
+
+            if not should_trade:
+                logger.info(f"Signal rejected by ML enhancement: {enhanced_info.get('reason', 'Unknown')}")
+                return None
+
+            # Enhance signal with ML information
+            ml_enhanced_signal = signal.copy()
+            ml_enhanced_signal['ml_enhanced'] = True
+            ml_enhanced_signal['ml_probability'] = ml_prediction['direction_probability']
+            ml_enhanced_signal['ml_confidence'] = ml_prediction['confidence_level']
+            ml_enhanced_signal['position_size_multiplier'] = enhanced_info.get('position_size_multiplier', 1.0)
+            ml_enhanced_signal['kelly_fraction'] = enhanced_info.get('kelly_fraction', 0.0)
+            ml_enhanced_signal['ml_features'] = ml_prediction.get('feature_importance', {})
+
+            # Adjust stop loss and take profit based on ML confidence
+            if ml_prediction['confidence_level'] == 'high':
+                # More aggressive targets for high confidence
+                ml_enhanced_signal['take_profit'] = signal['take_profit'] * 1.2  # Extend TP
+            elif ml_prediction['confidence_level'] == 'low':
+                # More conservative targets for low confidence
+                ml_enhanced_signal['stop_loss'] = signal['stop_loss'] * 0.95  # Tighter SL
+
+            logger.info(f"Signal enhanced with ML: {macd_signal} @ {ml_prediction['direction_probability']:.3f} "
+                       f"confidence ({ml_prediction['confidence_level']}), "
+                       f"position size: {enhanced_info.get('position_size_multiplier', 1.0):.1f}x")
+
+            return ml_enhanced_signal
+
+        except Exception as e:
+            logger.warning(f"Error in ML signal enhancement: {e}")
+            return signal  # Return original signal on error
+
     def _update_order_flow_data(self) -> None:
         """
         Update order flow analyzer with real-time market data.
@@ -2433,10 +2553,34 @@ class TradingBot:
             logger.info(f"P&L:             ${pnl:,.2f} ({pnl_pct:+.2f}% on margin)")
             logger.info("=" * 60)
 
-            # Update risk manager
-            self.risk_manager.update_daily_pnl(pnl)
+        # Update risk manager
+        self.risk_manager.update_daily_pnl(pnl)
 
-            # Log trade exit to audit log
+        # Update ML model performance if trade was ML-enhanced
+        if self.ml_enabled and self.current_position and self.current_position.get('ml_enhanced', False):
+            try:
+                # Determine actual direction
+                actual_direction = 'UP' if pnl > 0 else 'DOWN'
+
+                # Update ML enhancer with outcome
+                trade_timestamp = self.current_position.get('entry_time')
+                if trade_timestamp:
+                    self.ml_enhancer.update_prediction_outcome(
+                        prediction_timestamp=trade_timestamp,
+                        actual_direction=actual_direction,
+                        pnl=pnl
+                    )
+
+                    # Check if retraining is needed
+                    performance = self.ml_enhancer.get_performance_metrics()
+                    if performance.get('needs_retraining', False):
+                        logger.warning("⚠️ ML model performance degraded - retraining recommended")
+                        # Could trigger retraining here or alert user
+
+            except Exception as e:
+                logger.debug(f"Error updating ML performance: {e}")
+
+        # Log trade exit to audit log
             try:
                 self.audit_logger.log_trade_exit(
                     symbol=self.symbol,
@@ -2736,6 +2880,14 @@ class TradingBot:
                         signal = microstructure_signal
                     else:
                         signal = None  # Microstructure analysis rejected the signal
+
+                    # Further enhance with ML models if available
+                    if signal and self.ml_enabled:
+                        ml_enhanced_signal = self._enhance_signal_with_ml(signal, df)
+                        if ml_enhanced_signal:
+                            signal = ml_enhanced_signal
+                        else:
+                            signal = None  # ML enhancement rejected the signal
                     # Multi-timeframe analysis: Check higher timeframe trend
                     if self.multi_timeframe_enabled:
                         df_higher_tf = self.get_higher_timeframe_data()

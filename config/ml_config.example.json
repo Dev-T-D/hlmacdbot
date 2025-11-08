@@ -1,0 +1,88 @@
+{
+  "ml_enhancement": {
+    "enabled": true,
+    "inference": {
+      "confidence_thresholds": {
+        "high": 0.65,
+        "medium": 0.60,
+        "low": 0.55
+      },
+      "kelly_fraction": 0.5,
+      "max_position_size": 1.0,
+      "fallback_enabled": true
+    },
+    "monitoring": {
+      "retraining_threshold": 0.52,
+      "max_model_age_days": 30,
+      "performance_window": 1000,
+      "alert_threshold": 0.48
+    },
+    "explainability": {
+      "shap_enabled": true,
+      "feature_importance_tracking": true,
+      "max_explanations_stored": 100
+    }
+  },
+  "microstructure": {
+    "imbalance_threshold": 0.3,
+    "depth_levels": 10,
+    "large_trade_multiplier": 2.0
+  },
+  "smart_routing": {
+    "twap_min_order_size_usd": 50000,
+    "participation_rate": 0.1,
+    "max_child_orders": 20
+  },
+  "training": {
+    "data_collection": {
+      "lookback_days": 180,
+      "prediction_horizon": 5,
+      "min_price_move_pct": 0.1,
+      "cache_dir": "data/ml_cache"
+    },
+    "feature_engineering": {
+      "technical": {
+        "ema_periods": [9, 21, 50, 200],
+        "rsi_periods": [14, 21],
+        "bollinger_period": 20,
+        "bollinger_std": 2.0,
+        "atr_period": 14,
+        "adx_period": 14
+      }
+    },
+    "models": {
+      "lightgbm": {
+        "n_estimators": 1000,
+        "learning_rate": 0.05,
+        "max_depth": 6,
+        "num_leaves": 31,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8
+      },
+      "xgboost": {
+        "n_estimators": 1000,
+        "learning_rate": 0.05,
+        "max_depth": 6,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8
+      },
+      "random_forest": {
+        "n_estimators": 500,
+        "max_depth": 10,
+        "min_samples_split": 10,
+        "min_samples_leaf": 5
+      },
+      "lstm": {
+        "units": [128, 64],
+        "dropout": 0.2,
+        "batch_size": 32,
+        "epochs": 100,
+        "sequence_length": 60
+      }
+    },
+    "hyperparameter_tuning": {
+      "n_trials": 50,
+      "timeout_minutes": 30
+    }
+  }
+}
