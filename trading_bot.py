@@ -140,10 +140,83 @@ logger = logging.getLogger(__name__)
 
 
 class TradingBot:
-    """MACD Futures Trading Bot - Hyperliquid Exchange."""
+    """
+    MACD Futures Trading Bot for Hyperliquid Exchange.
+
+    This class implements a complete automated trading system featuring:
+    - Advanced MACD-based trend following strategy
+    - Real-time WebSocket data streaming with REST API fallback
+    - Comprehensive risk management with trailing stops
+    - Enterprise-grade reliability with circuit breakers and state recovery
+    - Detailed audit logging and tamper detection
+    - Multi-channel alerting and monitoring
+
+    The bot operates continuously, analyzing market conditions and executing trades
+    based on configurable strategy parameters and risk limits.
+
+    Attributes:
+        config (dict): Complete configuration dictionary with all bot settings
+        client (HyperliquidClient): Exchange API client for order execution
+        strategy (MACDStrategy): Trading strategy implementation
+        risk_manager (RiskManager): Position sizing and risk control
+        audit_logger (AuditLogger): Tamper-protected audit logging
+        websocket_enabled (bool): Whether WebSocket streaming is active
+        ws_client (Optional[HyperliquidWebSocketClient]): WebSocket client instance
+        current_price (Optional[float]): Latest price from WebSocket stream
+
+    Key Features:
+        - **Strategy**: MACD crossover signals with trend confirmation
+        - **Risk Management**: Configurable position sizing, stop-loss, take-profit
+        - **Data Sources**: WebSocket real-time + REST API historical
+        - **Reliability**: Automatic recovery, state persistence, error handling
+        - **Monitoring**: Comprehensive logging, metrics, and alerting
+        - **Security**: Encrypted credentials, input validation, audit trails
+
+    Example:
+        >>> bot = TradingBot('config/config.json')
+        >>> bot.run()
+        Starting MACD Trading Bot v2.0 (Hyperliquid)
+        Testnet: True, Dry Run: False
+        Connected to Hyperliquid exchange
+        WebSocket enabled - real-time data streaming active
+        Trading loop started - monitoring BTCUSDT
+    """
 
     def __init__(self, config_path: str = "config/config.json"):
-        """Initialize trading bot with configuration."""
+        """
+        Initialize the trading bot with comprehensive setup and validation.
+
+        This method performs complete bot initialization including:
+        - Configuration loading and validation
+        - Secure credential management
+        - Exchange connectivity testing
+        - WebSocket client setup (if enabled)
+        - Strategy and risk manager initialization
+        - Audit logging verification
+        - Health checks and startup validation
+
+        Args:
+            config_path (str): Path to JSON configuration file. Defaults to 'config/config.json'.
+                The configuration file should contain all required sections:
+                - exchange: Hyperliquid connection settings
+                - trading: Symbol, timeframe, intervals
+                - strategy: MACD parameters and filters
+                - risk: Position sizing and loss limits
+                - websocket: Real-time data settings (optional)
+
+        Raises:
+            ConfigurationError: If config file is missing, invalid, or incomplete
+            CredentialError: If required credentials cannot be loaded
+            ExchangeError: If exchange connectivity cannot be established
+            InitializationError: If any component fails to initialize properly
+
+        Example:
+            >>> # Initialize with default config
+            >>> bot = TradingBot()
+
+            >>> # Initialize with custom config
+            >>> bot = TradingBot('config/production.json')
+        """
         # Load and validate configuration
         self.config = self._load_config(config_path)
 
@@ -2721,7 +2794,51 @@ class TradingBot:
             logger.error(f"Error checking exit conditions (real-time): {e}")
 
     def run(self):
-        """Main bot loop."""
+        """
+        Execute the main trading bot loop with comprehensive error handling and monitoring.
+
+        This method implements the core trading logic that runs continuously:
+        1. **Initialization**: Sets up leverage, WebSocket connections, and daily stats
+        2. **Trading Loop**: Continuously monitors market conditions and executes trades
+        3. **Daily Reset**: Automatically resets daily statistics at UTC midnight
+        4. **Error Handling**: Comprehensive exception handling with graceful recovery
+        5. **Monitoring**: Logs system status, balance updates, and trading activity
+
+        The bot operates on a configurable check interval, analyzing market data,
+        generating trading signals, and executing orders while maintaining strict
+        risk management controls.
+
+        Key Behaviors:
+        - **Continuous Operation**: Runs indefinitely until interrupted (Ctrl+C)
+        - **Daily Statistics**: Resets P&L tracking at UTC midnight
+        - **Error Recovery**: Handles temporary API issues and continues operation
+        - **Position Monitoring**: Tracks open positions and manages risk
+        - **Real-time Updates**: Processes WebSocket data when available
+        - **Audit Logging**: Records all trading decisions and executions
+
+        The loop performs these steps in each cycle:
+        1. Process any pending WebSocket messages
+        2. Check for daily reset (UTC midnight)
+        3. Fetch current account balance
+        4. Retrieve market data (OHLCV candles)
+        5. Calculate technical indicators
+        6. Generate trading signals
+        7. Execute trades with risk management
+        8. Update position monitoring
+        9. Log system status and metrics
+
+        Raises:
+            KeyboardInterrupt: When user stops the bot (Ctrl+C)
+            SystemExit: On critical errors requiring shutdown
+            Exception: For unexpected errors (logged and handled)
+
+        Example:
+            >>> bot = TradingBot()
+            >>> try:
+            ...     bot.run()
+            ... except KeyboardInterrupt:
+            ...     print("Bot stopped by user")
+        """
         logger.info("🚀 Starting trading bot...")
 
         # Setup leverage

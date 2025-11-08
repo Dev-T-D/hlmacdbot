@@ -66,7 +66,59 @@ logger = logging.getLogger(__name__)
 
 
 class HyperliquidClient:
-    """Hyperliquid Exchange API Client for Futures Trading"""
+    """
+    Hyperliquid Exchange API Client for Futures Trading.
+
+    This class provides a complete interface to the Hyperliquid decentralized exchange,
+    implementing all necessary API calls for automated futures trading. It handles
+    authentication via EIP-712 signatures, rate limiting, error handling, and
+    provides both synchronous and asynchronous operation modes.
+
+    Key Features:
+        - **Authentication**: EIP-712 structured data signing with Ethereum private keys
+        - **Order Management**: Place, cancel, and track limit/market orders
+        - **Market Data**: Real-time ticker, historical OHLCV data, order book
+        - **Account Management**: Balance queries, position tracking, leverage settings
+        - **Rate Limiting**: Built-in rate limiting with exponential backoff
+        - **Error Handling**: Comprehensive error handling with retry logic
+        - **WebSocket Support**: Real-time market data streaming
+
+    Authentication:
+        The client uses Ethereum wallet-based authentication where:
+        - Private key signs all API requests using EIP-712 structured data
+        - Wallet address is derived from the private key
+        - No API keys required - pure cryptographic authentication
+
+    Supported Order Types:
+        - **Limit Orders**: Buy/sell at specified price
+        - **Market Orders**: Immediate execution at best available price
+        - **Stop Orders**: Triggered when price reaches specified level
+        - **Trailing Stops**: Dynamic stop-loss that trails price movements
+
+    Asset Index Mapping:
+        Hyperliquid uses integer indices for assets:
+        - BTC: 0, ETH: 1, SOL: 2, etc.
+        - Client automatically handles symbol-to-index conversion
+
+    Example:
+        >>> client = HyperliquidClient(
+        ...     private_key="0xabcdef...",
+        ...     wallet_address="0x123456...",
+        ...     testnet=True
+        ... )
+
+        >>> # Get account balance
+        >>> balance = client.get_account_balance()
+        >>> print(f"Balance: ${balance:.2f}")
+
+        >>> # Place limit order
+        >>> order = client.place_limit_order(
+        ...     symbol="BTCUSDT",
+        ...     side="BUY",
+        ...     quantity=0.001,
+        ...     price=45000.0
+        ... )
+    """
     
     # Default timeout for HTTP requests (seconds) - imported from constants module
     DEFAULT_TIMEOUT = DEFAULT_TIMEOUT  # From constants module

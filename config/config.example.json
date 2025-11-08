@@ -18,18 +18,71 @@
   },
   
   "strategy": {
+    "_comment": "Enhanced MACD Strategy Parameters",
+
+    "enhanced_strategy": true,
+
+    "_comment_macd": "MACD Core Parameters",
     "fast_length": 12,
     "slow_length": 26,
     "signal_length": 9,
     "risk_reward_ratio": 2.0,
+
+    "_comment_multitimeframe": "Multi-Timeframe Analysis",
+    "higher_timeframe_multiplier": 12,
+    "require_higher_tf_alignment": true,
+
+    "_comment_volume": "Volume Analysis",
+    "require_volume_confirmation": true,
+    "volume_period": 20,
+    "min_volume_multiplier": 1.2,
+    "volume_surge_threshold": 3.0,
+
+    "_comment_volatility": "Volatility Filters",
+    "use_atr_filter": true,
+    "atr_period": 14,
+    "max_volatility_multiplier": 3.0,
+    "use_bollinger_filter": true,
+    "bollinger_period": 20,
+    "bollinger_std": 2.0,
+
+    "_comment_regime": "Market Regime Detection",
+    "use_market_regime_filter": true,
+    "adx_period": 14,
+    "adx_trending_threshold": 25.0,
+    "adx_ranging_threshold": 20.0,
+
+    "_comment_filters": "Additional Entry Filters",
+    "use_rsi_divergence": true,
     "rsi_period": 14,
+    "use_support_resistance": true,
+    "sr_lookback_periods": 50,
+    "use_fibonacci_levels": true,
+    "use_round_number_filter": true,
+    "round_number_tolerance": 0.001,
+    "use_time_filter": true,
+    "trading_hours_start": 0,
+    "trading_hours_end": 23,
+
+    "_comment_exits": "Exit Strategy Enhancements",
+    "use_partial_profits": true,
+    "partial_profit_ratio": 0.5,
+    "partial_profit_target": 1.0,
+    "use_time_based_exit": true,
+    "max_trade_duration_hours": 24,
+    "use_break_even_stop": true,
+    "break_even_activation_rr": 1.0,
+
+    "_comment_adaptive": "Adaptive Parameters",
+    "use_adaptive_parameters": true,
+
+    "_comment_legacy": "Legacy Parameters (for backward compatibility)",
     "rsi_oversold": 30.0,
     "rsi_overbought": 70.0,
     "min_histogram_strength": 0.0,
-    "require_volume_confirmation": true,
-    "volume_period": 20,
     "min_trend_strength": 0.0,
-    "strict_long_conditions": true
+    "strict_long_conditions": true,
+    "disable_long_trades": false
   },
   
   "risk": {
@@ -66,6 +119,11 @@
     "enabled": false,
     "reconnect_interval": 5.0,
     "max_reconnect_attempts": 10
+  },
+  "cache": {
+    "redis_url": null,
+    "max_memory_size": 1000,
+    "default_ttl": 300
   },
   
   "_instructions": {
@@ -105,7 +163,7 @@
   "_environment_variables": {
     "note": "You can override credentials using environment variables:",
     "HYPERLIQUID_PRIVATE_KEY": "Overrides private_key",
-    "HYPERLIQUID_WALLET_ADDRESS": "Overrides wallet_address",
+    "HYPERLIQUID_WALLET_ADDRESS": "Overrides wallet_address"
   },
   
   "_security_notes": [

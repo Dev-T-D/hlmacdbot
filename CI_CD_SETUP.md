@@ -11,6 +11,7 @@ This project now includes a comprehensive GitHub Actions CI/CD pipeline that aut
 **Purpose**: Comprehensive testing and validation
 
 **Jobs**:
+
 - **Test**: Runs unit and integration tests on Python 3.11 and 3.12
   - Unit tests: `python run_tests.py --unit`
   - Integration tests: `python run_tests.py --integration`
@@ -37,6 +38,7 @@ This project now includes a comprehensive GitHub Actions CI/CD pipeline that aut
 **Purpose**: Dedicated code quality checks
 
 **Checks**:
+
 - Black formatter (check mode)
 - Flake8 linter with statistics
 - isort import sorting (check mode)
@@ -44,6 +46,7 @@ This project now includes a comprehensive GitHub Actions CI/CD pipeline that aut
 - TODO/FIXME comment detection (informational)
 
 **Triggers**: 
+
 - Push/PR to `main`, `master`, or `develop` branches
 - Weekly schedule (Sundays at 00:00 UTC)
 
@@ -52,6 +55,7 @@ This project now includes a comprehensive GitHub Actions CI/CD pipeline that aut
 **Purpose**: Generate and report test coverage metrics
 
 **Features**:
+
 - Runs all tests with coverage tracking
 - Generates coverage report and XML
 - Optional Codecov integration (if configured)
@@ -100,18 +104,22 @@ isort --profile=black --line-length=100 --skip="venv|\.venv" .
 ## Workflow Features
 
 ### Matrix Testing
+
 - Tests run on Python 3.11 and 3.12
 - Ensures compatibility across Python versions
 
 ### Parallel Execution
+
 - Jobs run in parallel for faster CI
 - `fail-fast: false` ensures all checks complete
 
 ### Caching
+
 - Pip dependencies are cached
 - Faster subsequent runs
 
 ### Environment Variables
+
 - `HYPERLIQUID_TESTNET: 'true'` set for test environment
 - No real credentials needed (tests use mocks)
 
@@ -144,6 +152,7 @@ isort --profile=black --line-length=100 --skip="venv|\.venv" .
 ### Linting Failures
 
 Review Flake8 errors and fix manually. Common issues:
+
 - Line too long (>100 chars)
 - Unused imports
 - Complexity too high
@@ -183,6 +192,7 @@ Review Flake8 errors and fix manually. Common issues:
 ## Documentation
 
 For more details, see:
+
 - `.github/workflows/README.md` - Detailed workflow documentation
 - `PRE_COMMIT_SETUP.md` - Pre-commit hooks setup
 - `TEST_SUITE_SUMMARY.md` - Test suite overview

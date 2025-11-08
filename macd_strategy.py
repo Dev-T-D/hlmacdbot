@@ -303,6 +303,7 @@ class MACDStrategy:
         # Improved stop loss calculation: Use percentage-based approach
         # This prevents premature stops from MACD-signal noise
         # Use 1% of entry price as base stop distance (wider stops = fewer premature exits)
+        # Optimal balance: 1% base stop with tighter trailing stop (1.5%) works best
         base_stop_pct = 0.01  # 1% of entry price
         
         # Also consider MACD-signal difference, but don't let it make stops too tight

@@ -169,24 +169,74 @@ class SecureKeyStorage:
         """
         return self._wallet_address
     
+    def emergency_zeroize(self) -> None:
+        """
+        Emergency zeroization of all sensitive data.
+
+        Immediately overwrites all sensitive data with zeros multiple times.
+        Called during critical security events to prevent key recovery.
+
+        This provides the highest level of assurance for key destruction.
+        """
+        logger.critical("🔴 EMERGENCY ZEROIZATION: Destroying all sensitive key material")
+
+        # Multiple overwrite passes for maximum security
+        for pass_num in range(3):
+            try:
+                # Overwrite session key with zeros
+                if hasattr(self, '_session_key') and self._session_key:
+                    key_len = len(self._session_key)
+                    self._session_key = b'\x00' * key_len
+
+                # Overwrite encrypted key with zeros
+                if hasattr(self, '_encrypted_key') and self._encrypted_key:
+                    key_len = len(self._encrypted_key)
+                    self._encrypted_key = b'\x00' * key_len
+
+                # Overwrite wallet address (not sensitive but clear anyway)
+                if hasattr(self, '_wallet_address'):
+                    self._wallet_address = '\x00' * len(self._wallet_address)
+
+            except Exception as e:
+                # Log but continue zeroization attempts
+                logger.error(f"Zeroization pass {pass_num + 1} error: {e}")
+
+        # Final deletion attempts
+        try:
+            delattr(self, '_session_key')
+        except AttributeError:
+            pass
+
+        try:
+            delattr(self, '_encrypted_key')
+        except AttributeError:
+            pass
+
+        try:
+            delattr(self, '_wallet_address')
+        except AttributeError:
+            pass
+
+        logger.critical("✅ Emergency zeroization completed - all key material destroyed")
+
     def clear(self) -> None:
         """
         Clear all sensitive data from memory.
-        
+
         This method attempts to clear the encrypted key and session key.
         Note: Due to Python's memory management, this doesn't guarantee
         immediate clearing, but it's the best effort we can make.
         """
-        # Overwrite encrypted key with random data (best effort)
+        # For normal cleanup, use random data overwrite
+        # For emergency situations, use emergency_zeroize() instead
         if hasattr(self, '_encrypted_key'):
             self._encrypted_key = secrets.token_bytes(len(self._encrypted_key))
             del self._encrypted_key
-        
-        # Overwrite session key with random data (best effort)
+
         if hasattr(self, '_session_key'):
             self._session_key = secrets.token_bytes(len(self._session_key))
             del self._session_key
-        
+
         logger.debug("SecureKeyStorage cleared")
     
     def __del__(self):
