@@ -1697,8 +1697,286 @@ class HyperliquidClient:
                     "takeProfit": take_profit
                 }
             }
-            
+
         except Exception as e:
             logger.error(f"Error updating stop-loss: {e}")
             raise
 
+    # ==========================================
+    # MARKET MICROSTRUCTURE APIs
+    # ==========================================
+
+    def get_orderbook(self, symbol: str, depth: int = 20) -> Dict:
+        """
+        Get real-time order book (Level 2 data) for market microstructure analysis.
+
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT')
+            depth: Number of price levels to retrieve (default: 20)
+
+        Returns:
+            Dictionary containing bids and asks with prices and quantities
+        """
+        try:
+            # Sanitize inputs
+            symbol = InputSanitizer.sanitize_symbol(symbol)
+            depth = InputSanitizer.sanitize_int(depth, "depth", min_value=1, max_value=50)
+
+            # Get asset index
+            asset_index = self._get_asset_index(symbol)
+            if asset_index is None:
+                raise ValueError(f"Unknown symbol: {symbol}")
+
+            # Request order book data
+            request_data = {
+                "type": "l2Book",
+                "coin": self._get_coin_name(symbol)
+            }
+
+            response = self._post_request("/info", request_data)
+
+            if response.get("status") != "ok":
+                raise ExchangeError(f"Failed to get orderbook: {response}")
+
+            book_data = response.get("l2Book", {})
+
+            # Extract and limit depth
+            bids = book_data.get("bids", [])[:depth]
+            asks = book_data.get("asks", [])[:depth]
+
+            return {
+                "symbol": symbol,
+                "timestamp": time.time(),
+                "bids": bids,  # [[price, quantity], ...]
+                "asks": asks,  # [[price, quantity], ...]
+                "depth": depth
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting orderbook for {symbol}: {e}")
+            raise
+
+    def subscribe_trades(self, symbol: str, callback: callable = None) -> None:
+        """
+        Subscribe to real-time trade data for trade flow analysis.
+
+        Args:
+            symbol: Trading symbol to subscribe to
+            callback: Function to call when new trade data arrives
+        """
+        try:
+            # This would typically use WebSocket subscription
+            # For now, implement as polling mechanism
+            coin = self._get_coin_name(symbol)
+
+            if self.ws_client and WEBSOCKETS_AVAILABLE:
+                # WebSocket subscription
+                logger.info(f"Subscribing to trades for {coin} via WebSocket")
+
+                async def subscribe():
+                    await self.ws_client.subscribe_trades(coin, callback)
+
+                # Run in event loop
+                if self.ws_client.ws_loop and self.ws_client.ws_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(subscribe(), self.ws_client.ws_loop)
+                else:
+                    logger.warning("WebSocket not available, falling back to polling")
+                    self._start_trade_polling(symbol, callback)
+            else:
+                # Fallback to polling
+                logger.info(f"Using trade polling for {coin}")
+                self._start_trade_polling(symbol, callback)
+
+        except Exception as e:
+            logger.error(f"Error subscribing to trades for {symbol}: {e}")
+            raise
+
+    def _start_trade_polling(self, symbol: str, callback: callable) -> None:
+        """Start polling for trade data as WebSocket fallback."""
+        def poll_trades():
+            last_trade_time = 0
+
+            while True:
+                try:
+                    # Get recent trades
+                    trades = self.get_recent_trades(symbol, limit=50)
+
+                    # Process new trades
+                    for trade in trades:
+                        trade_time = trade.get('timestamp', 0)
+                        if trade_time > last_trade_time:
+                            if callback:
+                                callback(trade)
+                            last_trade_time = trade_time
+
+                    time.sleep(1)  # Poll every second
+
+                except Exception as e:
+                    logger.error(f"Error in trade polling: {e}")
+                    time.sleep(5)  # Back off on error
+
+        # Start polling thread
+        import threading
+        polling_thread = threading.Thread(target=poll_trades, daemon=True)
+        polling_thread.start()
+        logger.info(f"Started trade polling thread for {symbol}")
+
+    def get_recent_trades(self, symbol: str, limit: int = 100) -> List[Dict]:
+        """
+        Get recent trades for trade flow analysis.
+
+        Args:
+            symbol: Trading symbol
+            limit: Number of trades to retrieve (max 500)
+
+        Returns:
+            List of recent trades with price, quantity, side, and timestamp
+        """
+        try:
+            # Sanitize inputs
+            symbol = InputSanitizer.sanitize_symbol(symbol)
+            limit = InputSanitizer.sanitize_int(limit, "limit", min_value=1, max_value=500)
+
+            coin = self._get_coin_name(symbol)
+
+            request_data = {
+                "type": "trades",
+                "coin": coin,
+                "limit": limit
+            }
+
+            response = self._post_request("/info", request_data)
+
+            if response.get("status") != "ok":
+                raise ExchangeError(f"Failed to get trades: {response}")
+
+            trades_data = response.get("trades", [])
+
+            # Format trades consistently
+            formatted_trades = []
+            for trade in trades_data:
+                formatted_trade = {
+                    'symbol': symbol,
+                    'price': float(trade.get('px', 0)),
+                    'quantity': float(trade.get('sz', 0)),
+                    'side': 'buy' if trade.get('side') == 'B' else 'sell',
+                    'timestamp': float(trade.get('time', time.time())),
+                    'value': float(trade.get('px', 0)) * float(trade.get('sz', 0))
+                }
+                formatted_trades.append(formatted_trade)
+
+            return formatted_trades
+
+        except Exception as e:
+            logger.error(f"Error getting recent trades for {symbol}: {e}")
+            return []
+
+    def get_funding_rate(self, symbol: str) -> Dict:
+        """
+        Get current funding rate for funding rate arbitrage analysis.
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Dictionary with current funding rate and related data
+        """
+        try:
+            symbol = InputSanitizer.sanitize_symbol(symbol)
+
+            request_data = {
+                "type": "fundingHistory",
+                "coin": self._get_coin_name(symbol),
+                "limit": 1  # Get latest funding rate
+            }
+
+            response = self._post_request("/info", request_data)
+
+            if response.get("status") != "ok":
+                raise ExchangeError(f"Failed to get funding rate: {response}")
+
+            funding_data = response.get("fundingHistory", [])
+            if not funding_data:
+                return {"funding_rate": 0.0, "timestamp": time.time()}
+
+            latest_funding = funding_data[0]
+            return {
+                "funding_rate": float(latest_funding.get("fundingRate", 0)),
+                "timestamp": float(latest_funding.get("time", time.time())),
+                "symbol": symbol
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting funding rate for {symbol}: {e}")
+            return {"funding_rate": 0.0, "timestamp": time.time(), "error": str(e)}
+
+    def get_large_positions(self, symbol: str, min_size_usd: float = 100000) -> List[Dict]:
+        """
+        Get large open positions for whale detection analysis.
+
+        Args:
+            symbol: Trading symbol
+            min_size_usd: Minimum position size in USD to qualify as "large"
+
+        Returns:
+            List of large positions (anonymized for privacy)
+        """
+        try:
+            symbol = InputSanitizer.sanitize_symbol(symbol)
+            min_size_usd = InputSanitizer.sanitize_float(min_size_usd, "min_size_usd", min_value=1000)
+
+            # Note: Hyperliquid doesn't expose individual user positions publicly
+            # This would need to be implemented differently or approximated
+            # For now, return empty list with a note
+            logger.warning("Large position detection not available on Hyperliquid DEX")
+
+            return []
+
+        except Exception as e:
+            logger.error(f"Error getting large positions for {symbol}: {e}")
+            return []
+
+    def get_liquidation_data(self, symbol: str) -> Dict:
+        """
+        Get recent liquidation data for market stress analysis.
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Dictionary with recent liquidation statistics
+        """
+        try:
+            symbol = InputSanitizer.sanitize_symbol(symbol)
+
+            # Get recent trades and identify liquidations
+            # Note: Hyperliquid may not explicitly mark liquidations
+            recent_trades = self.get_recent_trades(symbol, limit=500)
+
+            # Look for large trades that might indicate liquidations
+            # This is an approximation as DEXs don't always mark liquidations
+            large_trades = []
+            if recent_trades:
+                avg_trade_value = np.mean([t['value'] for t in recent_trades])
+
+                for trade in recent_trades:
+                    if trade['value'] > avg_trade_value * 5:  # 5x average trade
+                        large_trades.append(trade)
+
+            return {
+                "symbol": symbol,
+                "total_liquidations": len(large_trades),  # Approximation
+                "total_volume": sum(t['value'] for t in large_trades),
+                "avg_liquidation_size": np.mean([t['value'] for t in large_trades]) if large_trades else 0,
+                "largest_liquidation": max([t['value'] for t in large_trades]) if large_trades else 0,
+                "liquidation_trades": large_trades[:10]  # Return top 10
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting liquidation data for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "error": str(e),
+                "total_liquidations": 0,
+                "liquidation_trades": []
+            }

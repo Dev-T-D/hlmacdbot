@@ -27,6 +27,8 @@ cryptography>=41.0.0
 
 # WebSocket support for real-time data (optional)
 websockets>=12.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
 
 # Async HTTP client for high-performance API calls
 aiohttp>=3.9.0

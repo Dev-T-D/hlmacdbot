@@ -64,6 +64,8 @@ from hyperliquid_client import HyperliquidClient
 from hyperliquid_websocket import HyperliquidWebSocketClient, WEBSOCKETS_AVAILABLE
 from input_sanitizer import InputSanitizer
 from macd_strategy import MACDStrategy
+from order_flow_analyzer import OrderFlowAnalyzer
+from smart_order_router import SmartOrderRouter
 from order_tracker import OrderStatus, OrderTracker
 from risk_manager import RiskManager, TrailingStopLoss
 
@@ -329,6 +331,20 @@ class TradingBot:
             min_trend_strength=min_trend_strength,
             strict_long_conditions=strict_long_conditions,
             disable_long_trades=disable_long_trades,
+        )
+
+        # Initialize order flow analyzer for market microstructure analysis
+        microstructure_config = self.config.get("microstructure", {})
+        self.order_flow_analyzer = OrderFlowAnalyzer(
+            symbol=self.symbol,
+            config=microstructure_config
+        )
+
+        # Initialize smart order router
+        self.smart_router = SmartOrderRouter(
+            client=self.client,
+            order_flow_analyzer=self.order_flow_analyzer,
+            config=self.config.get("smart_routing", {})
         )
 
         # Sanitize risk parameters
@@ -2256,6 +2272,100 @@ class TradingBot:
 
         return False, ""
 
+    def _enhance_signal_with_microstructure(self, signal: Dict, df: pd.DataFrame) -> Optional[Dict]:
+        """
+        Enhance trading signal with market microstructure analysis.
+
+        Args:
+            signal: Original MACD signal
+            df: Market data DataFrame with indicators
+
+        Returns:
+            Enhanced signal dict or None if signal is rejected
+        """
+        try:
+            direction = signal.get('type', '')
+            entry_price = signal.get('entry_price', 0)
+
+            # Get comprehensive microstructure analysis
+            microstructure_analysis = self.order_flow_analyzer.get_comprehensive_signal(
+                direction=direction,
+                entry_price=entry_price
+            )
+
+            # Log microstructure analysis
+            logger.debug(f"Microstructure analysis for {direction}: "
+                        f"overall={microstructure_analysis['overall_signal']}, "
+                        f"confidence={microstructure_analysis['confidence_score']:.2f}")
+
+            # Reject signal if microstructure analysis fails
+            if not microstructure_analysis['overall_signal']:
+                logger.info(f"Signal rejected by microstructure analysis: {microstructure_analysis['reasons']}")
+                return None
+
+            # Enhance signal with microstructure confidence
+            enhanced_signal = signal.copy()
+            enhanced_signal['microstructure_confidence'] = microstructure_analysis['confidence_score']
+            enhanced_signal['microstructure_confirmations'] = microstructure_analysis['confirmations']
+            enhanced_signal['microstructure_reasons'] = microstructure_analysis['reasons']
+
+            # Use liquidity-based stop loss if available
+            if self.order_flow_analyzer.liquidity_heatmap:
+                liquidity_sl = self.order_flow_analyzer.get_liquidity_based_sl(
+                    entry_price=entry_price,
+                    direction=direction,
+                    risk_pct=0.02  # 2% risk
+                )
+
+                if liquidity_sl != signal.get('stop_loss'):
+                    logger.debug(f"Using liquidity-based SL: ${liquidity_sl:.2f} "
+                               f"(original: ${signal.get('stop_loss', 0):.2f})")
+                    enhanced_signal['stop_loss'] = liquidity_sl
+
+            logger.info(f"Signal enhanced with microstructure analysis: "
+                       f"{microstructure_analysis['confirmations']} confirmations, "
+                       f"confidence {microstructure_analysis['confidence_score']:.2f}")
+
+            return enhanced_signal
+
+        except Exception as e:
+            logger.warning(f"Error in microstructure signal enhancement: {e}")
+            return signal  # Return original signal on error
+
+    def _update_order_flow_data(self) -> None:
+        """
+        Update order flow analyzer with real-time market data.
+
+        Fetches order book and recent trades to maintain current market microstructure state.
+        """
+        try:
+            # Update order book data
+            try:
+                orderbook_data = self.client.get_orderbook(self.symbol, depth=20)
+                if orderbook_data:
+                    snapshot = self.order_flow_analyzer.update_orderbook(
+                        orderbook_data['bids'],
+                        orderbook_data['asks']
+                    )
+                    logger.debug(f"Updated orderbook: mid={snapshot.mid_price:.2f}, "
+                               f"spread={snapshot.spread_bps:.1f}bps")
+            except Exception as e:
+                logger.debug(f"Could not update orderbook: {e}")
+
+            # Update volume profile with recent trades
+            try:
+                recent_trades = self.client.get_recent_trades(self.symbol, limit=50)
+                for trade in recent_trades:
+                    self.order_flow_analyzer.update_volume_profile(
+                        price=trade['price'],
+                        volume=trade['quantity']
+                    )
+            except Exception as e:
+                logger.debug(f"Could not update volume profile: {e}")
+
+        except Exception as e:
+            logger.debug(f"Error updating order flow data: {e}")
+
     def close_position(self, reason: str, current_price: Optional[float] = None) -> bool:
         """
         Close current position with input sanitization.
@@ -2517,6 +2627,9 @@ class TradingBot:
             # This doesn't require indicators, so we do it first
             self._sync_position_with_exchange()
 
+            # Update order flow analyzer with real-time market data
+            self._update_order_flow_data()
+
             # Only calculate indicators when we actually need them:
             # - If we have a position: need for exit signals
             # - If we don't have a position: need for entry signals
@@ -2617,6 +2730,12 @@ class TradingBot:
                 signal = self.strategy.check_entry_signal(df)
 
                 if signal:
+                    # Enhance signal with market microstructure analysis
+                    microstructure_signal = self._enhance_signal_with_microstructure(signal, df)
+                    if microstructure_signal:
+                        signal = microstructure_signal
+                    else:
+                        signal = None  # Microstructure analysis rejected the signal
                     # Multi-timeframe analysis: Check higher timeframe trend
                     if self.multi_timeframe_enabled:
                         df_higher_tf = self.get_higher_timeframe_data()
