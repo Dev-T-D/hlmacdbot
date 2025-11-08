@@ -1,0 +1,126 @@
+{
+  "regime_detection": {
+    "thresholds": {
+      "trend_strength": 25,
+      "volatility_high": 1.5,
+      "volatility_low": 0.7,
+      "range_bound_adx": 20,
+      "breakout_bb_percentile": 20
+    },
+    "hmm": {
+      "n_states": 3,
+      "enabled": true
+    },
+    "persistence": {
+      "min_periods": 3,
+      "max_history": 1000
+    },
+    "multi_timeframe": {
+      "enabled": true,
+      "timeframes": ["5m", "1h", "4h"]
+    },
+    "volatility_forecast": {
+      "enabled": true,
+      "horizon": 1,
+      "garch_p": 1,
+      "garch_q": 1
+    }
+  },
+  "adaptive_strategy": {
+    "regime_parameters": {
+      "bull_trend": {
+        "strategy_type": "MACD_OVERLAY",
+        "macd_fast": 8, "macd_slow": 21, "macd_signal": 5,
+        "risk_reward_ratio": 3.0,
+        "position_size_multiplier": 1.2,
+        "trailing_stop_pct": 2.0,
+        "min_histogram_strength": 0.0005,
+        "strict_long_conditions": true,
+        "disable_short_trades": true
+      },
+      "bear_trend": {
+        "strategy_type": "MACD_OVERLAY",
+        "macd_fast": 8, "macd_slow": 21, "macd_signal": 5,
+        "risk_reward_ratio": 3.0,
+        "position_size_multiplier": 1.0,
+        "trailing_stop_pct": 2.0,
+        "min_histogram_strength": 0.0005,
+        "strict_long_conditions": true,
+        "disable_long_trades": true
+      },
+      "ranging": {
+        "strategy_type": "MEAN_REVERSION",
+        "bb_period": 20, "bb_std": 2.0,
+        "rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70,
+        "risk_reward_ratio": 1.5,
+        "position_size_multiplier": 0.8,
+        "trailing_stop_pct": 1.0,
+        "require_volume_confirmation": false
+      },
+      "high_volatility": {
+        "strategy_type": "BREAKOUT",
+        "risk_reward_ratio": 2.5,
+        "position_size_multiplier": 0.5,
+        "trailing_stop_pct": 3.0,
+        "min_histogram_strength": 0.001,
+        "use_adx_filter": false
+      },
+      "low_volatility": {
+        "strategy_type": "NONE",
+        "position_size_multiplier": 0.0
+      },
+      "breakout_pending": {
+        "strategy_type": "BREAKOUT",
+        "risk_reward_ratio": 3.0,
+        "position_size_multiplier": 1.5,
+        "trailing_stop_pct": 1.5,
+        "min_histogram_strength": 0.001
+      }
+    },
+    "transition_rules": {
+      "min_regime_persistence": 3,
+      "allow_partial_transitions": true,
+      "smooth_transitions": true
+    },
+    "performance_adaptation": {
+      "enabled": true,
+      "min_trades_for_adaptation": 50,
+      "adaptation_rate": 0.1
+    }
+  },
+  "advanced_risk": {
+    "limits": {
+      "max_position_size_pct": 0.05,
+      "max_risk_per_trade_pct": 0.02,
+      "max_daily_loss_pct": 0.05,
+      "max_daily_trades": 10,
+      "max_weekly_loss_pct": 0.15,
+      "max_portfolio_leverage": 5.0,
+      "max_concurrent_positions": 3,
+      "circuit_breaker_daily_loss_pct": 0.08,
+      "circuit_breaker_weekly_loss_pct": 0.20
+    },
+    "kelly": {
+      "fraction": 0.25
+    },
+    "volatility": {
+      "adjustment_enabled": true,
+      "max_volatility_adjustment": 0.5
+    },
+    "equity_curve": {
+      "protection_enabled": true,
+      "drawdown_levels": [0.05, 0.10, 0.15, 0.20],
+      "reduction_factors": [0.75, 0.50, 0.25, 0.10]
+    },
+    "correlation": {
+      "check_enabled": true,
+      "max_correlation": 0.7,
+      "reduction_factor": 0.5
+    },
+    "time_based": {
+      "weekend_reduction": 0.5,
+      "funding_window_reduction": 0.8,
+      "low_liquidity_reduction": 0.7
+    }
+  }
+}

@@ -67,6 +67,11 @@ from macd_strategy import MACDStrategy
 from order_flow_analyzer import OrderFlowAnalyzer
 from smart_order_router import SmartOrderRouter
 from ml_signal_enhancer import MLSignalEnhancer
+from kelly_calculator import KellyCalculator
+from mae_analyzer import MAEAnalyzer
+from advanced_risk_manager import AdvancedRiskManager
+from regime_detector import RegimeDetector
+from adaptive_strategy import AdaptiveStrategy, StrategyParameters
 from order_tracker import OrderStatus, OrderTracker
 from risk_manager import RiskManager, TrailingStopLoss
 
@@ -361,6 +366,35 @@ class TradingBot:
             logger.info("✅ ML signal enhancement enabled")
         else:
             logger.warning("⚠️ ML models not available - using traditional signals")
+
+        # Initialize advanced risk manager
+        risk_config = self.config.get("advanced_risk", {})
+        self.advanced_risk_manager = AdvancedRiskManager(config=risk_config)
+
+        # Initialize market regime detector
+        regime_config = self.config.get("regime_detection", {})
+        self.regime_detector = RegimeDetector(config=regime_config)
+
+        # Initialize adaptive strategy
+        strategy_config = self.config.get("adaptive_strategy", {})
+        self.adaptive_strategy = AdaptiveStrategy(config=strategy_config)
+
+        # Initialize risk state with current balance
+        initial_balance = self.config.get("private_key", 10000)  # Placeholder
+        try:
+            initial_balance = self.get_account_balance()
+        except:
+            initial_balance = 10000  # Fallback
+
+        self.advanced_risk_manager.risk_state.update_balance(initial_balance)
+
+        # Current market regime and strategy parameters
+        self.current_regime = None
+        self.current_strategy_params = None
+
+        logger.info("✅ Advanced risk management initialized")
+        logger.info("✅ Market regime detection initialized")
+        logger.info("✅ Adaptive strategy system initialized")
 
         # Sanitize risk parameters
         leverage = InputSanitizer.sanitize_leverage(self.config["risk"]["leverage"], exchange)
@@ -1845,37 +1879,43 @@ class TradingBot:
             take_profit = signal["take_profit"]
             position_type = signal["type"]
 
-            # Calculate position size, accounting for existing positions
+            # Use advanced risk manager for position sizing
             existing_positions = [self.current_position] if self.current_position else []
-            base_size_info = self.risk_manager.calculate_position_size(
-                balance=balance,
+            ml_confidence = signal.get('ml_probability', 0.5) if 'ml_probability' in signal else 1.0
+
+            # Get market data for risk calculations
+            market_data = {
+                'atr': self.current_atr if hasattr(self, 'current_atr') else 0.01,
+                'avg_atr': self.average_atr if hasattr(self, 'average_atr') else 0.01
+            }
+
+            # Calculate position size using advanced risk management
+            sizing_result = self.advanced_risk_manager.calculate_position_size(
+                symbol=self.symbol,
                 entry_price=entry_price,
                 stop_loss=stop_loss,
-                min_qty=MIN_QUANTITY,
-                qty_precision=QUANTITY_PRECISION,
-                existing_positions=existing_positions,
+                account_balance=balance,
+                current_positions=existing_positions,
+                ml_confidence=ml_confidence,
+                market_data=market_data
             )
 
-            # Apply ML-based position size adjustment if available
-            ml_multiplier = signal.get('position_size_multiplier', 1.0)
-            if ml_multiplier != 1.0:
-                adjusted_quantity = base_size_info['quantity'] * ml_multiplier
-                # Ensure we don't exceed maximum position size
-                max_qty = base_size_info.get('max_quantity', base_size_info['quantity'] * 2)
-                adjusted_quantity = min(adjusted_quantity, max_qty)
-                # Ensure we meet minimum quantity
-                adjusted_quantity = max(adjusted_quantity, MIN_QUANTITY)
+            if sizing_result.rejected:
+                logger.warning(f"Position sizing rejected: {sizing_result.rejection_reason}")
+                return None
 
-                # Update size_info with ML-adjusted quantity
-                size_info = base_size_info.copy()
-                size_info['quantity'] = adjusted_quantity
-                size_info['notional_value'] = adjusted_quantity * entry_price
-                size_info['position_risk'] = abs(entry_price - stop_loss) * adjusted_quantity
+            # Convert to format expected by rest of system
+            size_info = {
+                'quantity': sizing_result.position_size_usd / entry_price,  # Convert to quantity
+                'notional_value': sizing_result.position_size_usd,
+                'position_risk': sizing_result.risk_amount_usd,
+                'risk_pct': sizing_result.risk_amount_pct,
+                'max_quantity': sizing_result.position_size_usd / entry_price * 1.5  # Conservative max
+            }
 
-                logger.info(f"ML-adjusted position size: {base_size_info['quantity']:.4f} -> "
-                           f"{adjusted_quantity:.4f} ({ml_multiplier:.1f}x multiplier)")
-            else:
-                size_info = base_size_info
+            logger.info(f"Advanced risk position sizing: ${sizing_result.position_size_usd:.2f} "
+                       f"({sizing_result.position_size_pct:.3f}%), Risk: ${sizing_result.risk_amount_usd:.2f} "
+                       f"({sizing_result.risk_amount_pct:.3f}%)")
 
             # Validate order (may raise OrderValidationError)
             try:
@@ -2452,6 +2492,103 @@ class TradingBot:
             logger.warning(f"Error in ML signal enhancement: {e}")
             return signal  # Return original signal on error
 
+    def _detect_market_regime(self, df: pd.DataFrame) -> None:
+        """
+        Detect current market regime and adapt strategy parameters.
+
+        Args:
+            df: Market data DataFrame
+        """
+        try:
+            # Detect regime
+            regime_analysis = self.regime_detector.detect_regime(df, self.symbol)
+
+            # Check if regime changed
+            regime_changed = (self.current_regime is None or
+                            self.current_regime != regime_analysis.primary_regime)
+
+            if regime_changed:
+                logger.info(f"🎯 Market regime change detected: "
+                           f"{self.current_regime.value if self.current_regime else 'None'} → "
+                           f"{regime_analysis.primary_regime.value} "
+                           f"(confidence: {regime_analysis.confidence_score:.2f})")
+
+                # Handle regime transition
+                if self.current_regime is not None:
+                    transition_actions = self.adaptive_strategy.handle_regime_transition(
+                        self.current_regime, regime_analysis.primary_regime
+                    )
+
+                    # Log transition actions
+                    if transition_actions['close_positions'] and self.current_position:
+                        logger.info("🔄 Regime change - closing existing position")
+                        self.close_position(f"Regime change to {regime_analysis.primary_regime.value}")
+
+                    if transition_actions['adjust_stops'] and self.current_position:
+                        logger.info("🔄 Regime change - adjusting stops")
+                        # This would trigger stop adjustment logic
+
+                # Adapt strategy to new regime
+                self.current_strategy_params = self.adaptive_strategy.adapt_to_regime(
+                    regime_analysis.primary_regime,
+                    regime_analysis.confidence_score
+                )
+
+                # Update strategy parameters dynamically
+                self._update_strategy_parameters(self.current_strategy_params)
+
+                self.current_regime = regime_analysis.primary_regime
+
+                # Log regime-specific strategy
+                logger.info(f"🎛️ Adapted strategy for {regime_analysis.primary_regime.value}: "
+                           f"{self.current_strategy_params.strategy_type}, "
+                           f"RR: {self.current_strategy_params.risk_reward_ratio:.1f}, "
+                           f"Size Multiplier: {self.current_strategy_params.position_size_multiplier:.2f}")
+
+            # Update regime persistence for transition detection
+            self.regime_detector.persistence_tracker.add_observation(regime_analysis.primary_regime)
+
+        except Exception as e:
+            logger.warning(f"Error detecting market regime: {e}")
+            # Continue with existing regime if detection fails
+
+    def _update_strategy_parameters(self, new_params: StrategyParameters) -> None:
+        """
+        Update strategy with new regime-adapted parameters.
+
+        Args:
+            new_params: New strategy parameters
+        """
+        try:
+            # Update MACD strategy parameters
+            if hasattr(self.strategy, 'update_parameters'):
+                strategy_params = {
+                    'fast_length': new_params.macd_fast,
+                    'slow_length': new_params.macd_slow,
+                    'signal_length': new_params.macd_signal,
+                    'risk_reward_ratio': new_params.risk_reward_ratio,
+                    'rsi_period': new_params.rsi_period,
+                    'rsi_oversold': new_params.rsi_oversold,
+                    'rsi_overbought': new_params.rsi_overbought,
+                    'min_histogram_strength': new_params.min_histogram_strength,
+                    'require_volume_confirmation': new_params.require_volume_confirmation,
+                    'volume_period': new_params.volume_period,
+                    'min_trend_strength': new_params.min_trend_strength,
+                    'strict_long_conditions': new_params.strict_long_conditions,
+                    'disable_long_trades': new_params.disable_long_trades,
+                    'disable_short_trades': new_params.disable_short_trades
+                }
+                self.strategy.update_parameters(strategy_params)
+
+            # Update trailing stop parameters if applicable
+            if self.trailing_stop_enabled and self.trailing_stop and hasattr(self.trailing_stop, 'update_trail_percent'):
+                self.trailing_stop.update_trail_percent(new_params.trailing_stop_pct / 100.0)
+
+            logger.debug("Strategy parameters updated for new regime")
+
+        except Exception as e:
+            logger.warning(f"Error updating strategy parameters: {e}")
+
     def _update_order_flow_data(self) -> None:
         """
         Update order flow analyzer with real-time market data.
@@ -2579,6 +2716,25 @@ class TradingBot:
 
             except Exception as e:
                 logger.debug(f"Error updating ML performance: {e}")
+
+        # Record trade result for regime performance tracking
+        if self.current_regime and self.current_position:
+            try:
+                trade_result = {
+                    'regime': self.current_regime.value,
+                    'pnl_pct': pnl_pct,
+                    'duration_minutes': 0,  # Would calculate from entry/exit times
+                    'position_size': self.current_position.get('quantity', 0),
+                    'entry_price': self.current_position.get('entry_price', 0),
+                    'exit_price': current_price,
+                    'strategy_type': self.current_strategy_params.strategy_type if self.current_strategy_params else 'unknown'
+                }
+
+                self.adaptive_strategy.record_trade_result(self.current_regime, trade_result)
+                logger.debug(f"Recorded trade result for regime {self.current_regime.value}")
+
+            except Exception as e:
+                logger.debug(f"Error recording regime trade result: {e}")
 
         # Log trade exit to audit log
             try:
@@ -2773,6 +2929,9 @@ class TradingBot:
 
             # Update order flow analyzer with real-time market data
             self._update_order_flow_data()
+
+            # Detect current market regime
+            self._detect_market_regime(df)
 
             # Only calculate indicators when we actually need them:
             # - If we have a position: need for exit signals
