@@ -142,43 +142,60 @@ class HyperliquidClient:
     # Reverse mapping for asset index to symbol
     ASSET_TO_SYMBOL = {v: k for k, v in SYMBOL_TO_ASSET.items() if "USDT" in k}
     
-    def __init__(self, private_key: str, wallet_address: str, testnet: bool = True, timeout: int = None):
+    def __init__(self, private_key: str, wallet_address: str, testnet: bool = True, timeout: int = None, demo_mode: bool = False):
         """
         Initialize Hyperliquid client
-        
+
         Args:
             private_key: Ethereum private key (with or without 0x prefix)
             wallet_address: Ethereum wallet address (agent wallet)
             testnet: Use testnet or mainnet
             timeout: HTTP request timeout in seconds (default: 10)
+            demo_mode: Skip credential validation for historical data access only
         """
+        # Store demo mode flag
+        self.demo_mode = demo_mode
+
         # Ensure private key has 0x prefix
         if not private_key.startswith('0x'):
             private_key = '0x' + private_key
 
-        # Validate private key is not obviously invalid
-        if len(private_key) != 66:  # 0x + 64 hex chars
-            raise ExchangeAuthenticationError(
-                f"Invalid private key length: expected 66 characters (0x + 64 hex), got {len(private_key)}"
-            )
+        # Store key components for validation
+        key_hex = private_key[2:].lower() if len(private_key) > 2 else ""
 
-        # Check for obviously invalid keys
-        key_hex = private_key[2:].lower()
-        if key_hex == '0' * 64:
-            raise ExchangeAuthenticationError("Invalid private key: cannot use zero private key")
+        # Validate private key only if not in demo mode
+        if not demo_mode:
+            if len(private_key) != 66:  # 0x + 64 hex chars
+                raise ExchangeAuthenticationError(
+                    f"Invalid private key length: expected 66 characters (0x + 64 hex), got {len(private_key)}"
+                )
 
-        # Check if it's all the same character (another common invalid pattern)
-        if len(set(key_hex)) == 1:
-            raise ExchangeAuthenticationError("Invalid private key: appears to be a test/placeholder key")
+            # Check for obviously invalid keys
+            if key_hex == '0' * 64:
+                raise ExchangeAuthenticationError("Invalid private key: cannot use zero private key")
 
-        # Store private key securely with in-memory encryption
-        try:
-            self._secure_key_storage = SecureKeyStorage(private_key)
-            logger.debug("Private key stored securely with in-memory encryption")
-        except ValueError as e:
-            raise ExchangeAuthenticationError(
-                f"Failed to initialize secure key storage: {e}"
-            ) from e
+            # Additional validation for real keys
+            try:
+                int(key_hex, 16)  # Ensure it's valid hex
+            except ValueError:
+                raise ExchangeAuthenticationError("Invalid private key: not valid hexadecimal")
+
+            # Check if it's all the same character (another common invalid pattern)
+            if len(set(key_hex)) == 1:
+                raise ExchangeAuthenticationError("Invalid private key: appears to be a test/placeholder key")
+
+        # Store private key securely with in-memory encryption (skip in demo mode)
+        if not demo_mode:
+            try:
+                self._secure_key_storage = SecureKeyStorage(private_key, demo_mode=demo_mode)
+                logger.debug("Private key stored securely with in-memory encryption")
+            except ValueError as e:
+                raise ExchangeAuthenticationError(
+                    f"Failed to initialize secure key storage: {e}"
+                ) from e
+        else:
+            self._secure_key_storage = None  # No secure storage in demo mode
+            logger.debug("Demo mode: skipping secure key storage")
         
         # Clear the plaintext key from memory (best effort)
         del private_key
@@ -187,36 +204,39 @@ class HyperliquidClient:
         self.testnet = testnet
         self.timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT
         
-        # Validate that the wallet address matches the private key
-        # Get account from secure storage for validation
-        try:
-            account = self._secure_key_storage.get_account()
-            derived_address = account.address.lower()
-            logger.debug(f"Initialized Hyperliquid client for address: {derived_address}")
-        except Exception as e:
-            logger.error(f"Failed to initialize Ethereum account from private key: {e}")
-            raise ExchangeAuthenticationError(
-                f"Failed to initialize Ethereum account from private key. "
-                f"Error: {str(e)}. "
-                f"Check: 1) Private key format (must start with 0x and be 66 characters), "
-                f"2) Private key is valid hex string, 3) Private key matches wallet address. "
-                f"Wallet address: {wallet_address[:10]}...{wallet_address[-8:] if wallet_address else 'N/A'}"
-            ) from e
+        # Validate that the wallet address matches the private key (skip in demo mode)
+        if not demo_mode:
+            try:
+                account = self._secure_key_storage.get_account()
+                derived_address = account.address.lower()
+                logger.debug(f"Initialized Hyperliquid client for address: {derived_address}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Ethereum account from private key: {e}")
+                raise ExchangeAuthenticationError(
+                    f"Failed to initialize Ethereum account from private key. "
+                    f"Error: {str(e)}. "
+                    f"Check: 1) Private key format (must start with 0x and be 66 characters), "
+                    f"2) Private key is valid hex string, 3) Private key matches wallet address. "
+                    f"Wallet address: {wallet_address[:10]}...{wallet_address[-8:] if wallet_address else 'N/A'}"
+                ) from e
+        else:
+            logger.debug("Demo mode: skipping wallet address validation")
 
-        # Validate that the wallet address matches the private key
-        if derived_address != self.wallet_address.lower():
-            raise ExchangeAuthenticationError(
-                f"Wallet address mismatch. "
-                f"Provided address: {self.wallet_address}, "
-                f"Derived address from private key: {derived_address}. "
-                f"These addresses do not match. "
-                f"Check: 1) Private key is correct, 2) Wallet address is correct, "
-                f"3) Both are for the same Ethereum account. "
-                f"Private key must correspond to the provided wallet address."
-            )
-        
-        # Clear account from memory after validation (it will be recreated when needed)
-        del account
+        # Validate that the wallet address matches the private key (skip in demo mode)
+        if not demo_mode:
+            if derived_address != self.wallet_address.lower():
+                raise ExchangeAuthenticationError(
+                    f"Wallet address mismatch. "
+                    f"Provided address: {self.wallet_address}, "
+                    f"Derived address from private key: {derived_address}. "
+                    f"These addresses do not match. "
+                    f"Check: 1) Private key is correct, 2) Wallet address is correct, "
+                    f"3) Both are for the same Ethereum account. "
+                    f"Private key must correspond to the provided wallet address."
+                )
+
+            # Clear account from memory after validation (it will be recreated when needed)
+            del account
         
         # Set base URLs
         if testnet:
@@ -266,14 +286,22 @@ class HyperliquidClient:
     def _get_account(self) -> LocalAccount:
         """
         Get the Ethereum account object for signing.
-        
+
         This method retrieves the account from secure key storage.
         The account is recreated each time to minimize memory exposure,
         though the LocalAccount object itself still contains the key internally.
-        
+
         Returns:
             LocalAccount object for signing
+
+        Raises:
+            ExchangeAuthenticationError: If in demo mode and account access is attempted
         """
+        if self.demo_mode:
+            raise ExchangeAuthenticationError(
+                "Cannot access Ethereum account in demo mode. "
+                "Demo mode is for historical data access only."
+            )
         return self._secure_key_storage.get_account()
     
     def _should_retry(self, exception: Exception, response: Optional[requests.Response] = None) -> bool:

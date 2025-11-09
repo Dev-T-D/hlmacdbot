@@ -38,33 +38,37 @@ class SecureKeyStorage:
     - No plaintext key storage in memory (except briefly during operations)
     """
     
-    def __init__(self, private_key: str):
+    def __init__(self, private_key: str, demo_mode: bool = False):
         """
         Initialize secure key storage with a private key.
-        
+
         Args:
             private_key: Ethereum private key (with or without 0x prefix)
-        
+            demo_mode: Skip validation for demo/historical data access
+
         Raises:
             ValueError: If private key is invalid
         """
         # Ensure private key has 0x prefix
         if not private_key.startswith('0x'):
             private_key = '0x' + private_key
-        
-        # Validate private key format
-        if len(private_key) != 66:  # 0x + 64 hex chars
-            raise ValueError(
-                f"Invalid private key length: expected 66 characters (0x + 64 hex), got {len(private_key)}"
-            )
-        
-        # Check for obviously invalid keys
-        key_hex = private_key[2:].lower()
-        if key_hex == '0' * 64:
-            raise ValueError("Invalid private key: cannot use zero private key")
-        
-        if len(set(key_hex)) == 1:
-            raise ValueError("Invalid private key: appears to be a test/placeholder key")
+
+        # Store key components for validation
+        key_hex = private_key[2:].lower() if len(private_key) > 2 else ""
+
+        # Validate private key format only if not in demo mode
+        if not demo_mode:
+            if len(private_key) != 66:  # 0x + 64 hex chars
+                raise ValueError(
+                    f"Invalid private key length: expected 66 characters (0x + 64 hex), got {len(private_key)}"
+                )
+
+            # Check for obviously invalid keys
+            if key_hex == '0' * 64:
+                raise ValueError("Invalid private key: cannot use zero private key")
+
+            if len(set(key_hex)) == 1:
+                raise ValueError("Invalid private key: appears to be a test/placeholder key")
         
         # Generate a random session key for encryption (32 bytes for AES-256)
         self._session_key = secrets.token_bytes(32)

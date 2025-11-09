@@ -37,6 +37,11 @@ tensorflow>=2.13.0  # Optional: for LSTM models
 shap>=0.42.0        # Optional: for model explainability
 optuna>=3.3.0       # Optional: for hyperparameter optimization
 
+# ONNX dependencies for ultra-fast ML inference
+onnxmltools>=1.11.0  # Model conversion to ONNX
+onnxruntime>=1.15.0  # Optimized ONNX runtime
+numba>=0.57.0        # JIT compilation for feature engineering
+
 # Async HTTP client for high-performance API calls
 aiohttp>=3.9.0
 

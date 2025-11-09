@@ -1,0 +1,10 @@
+{
+  "symbols": ["BTC", "ETH", "SOL"],
+  "timeframes": ["1h"],
+  "retrain_schedule": "daily",
+  "min_new_samples": 100,
+  "min_accuracy_threshold": 0.55,
+  "validation_split": 0.2,
+  "models_to_train": ["lightgbm", "xgboost", "random_forest"],
+  "n_features": 50
+}

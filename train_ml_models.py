@@ -144,9 +144,10 @@ def main():
         logger.info(f"📝 Training summary saved to {summary_file}")
 
         # Final success message
-        print("\n" + "🎉 ML MODEL TRAINING COMPLETED SUCCESSFULLY!"        print("   Models saved and ready for production use")
+        print("\n" + "🎉 ML MODEL TRAINING COMPLETED SUCCESSFULLY!")
+        print("   Models saved and ready for production use")
         print(f"   Model directory: models/{args.symbol}/")
-        print("   Update your trading bot config to enable ML enhancement"
+        print("   Update your trading bot config to enable ML enhancement")
         return 0
 
     except Exception as e:

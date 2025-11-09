@@ -1,0 +1,15 @@
+
+🎯 ONNX Model Conversion Summary
+================================
+
+Total Models: 4
+Successful Conversions: 0
+Failed Conversions: 4
+
+Model Status:
+  ❌ lightgbm
+  ❌ xgboost
+  ❌ random_forest
+  ❌ lstm
+
+⚠️  4 model(s) failed conversion.

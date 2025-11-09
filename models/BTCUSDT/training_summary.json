@@ -1,0 +1,43 @@
+{
+  "training_timestamp": "2025-11-08T19:11:55.814136",
+  "symbol": "BTCUSDT",
+  "training_days": 60,
+  "n_samples": 4315,
+  "models_trained": [
+    "lightgbm",
+    "xgboost",
+    "random_forest",
+    "lstm"
+  ],
+  "validation_results": {
+    "lightgbm": {
+      "accuracy": 0.5162287480680062,
+      "precision": 0.4289940828402367,
+      "recall": 0.5471698113207547,
+      "f1_score": 0.48092868988391374,
+      "auc": 0.5273288550824854
+    },
+    "xgboost": {
+      "accuracy": 0.5610510046367851,
+      "precision": 0.46494464944649444,
+      "recall": 0.47547169811320755,
+      "f1_score": 0.4701492537313433,
+      "auc": 0.5697915637656821
+    },
+    "random_forest": {
+      "accuracy": 0.9613601236476044,
+      "precision": 0.9918032786885246,
+      "recall": 0.9132075471698113,
+      "f1_score": 0.9508840864440079,
+      "auc": 0.9946162204879977
+    },
+    "lstm": {
+      "accuracy": 0.5059625212947189,
+      "precision": 0.4223918575063613,
+      "recall": 0.7248908296943232,
+      "f1_score": 0.5337620578778135,
+      "auc": 0.5434973530775048
+    }
+  },
+  "hyperparameter_optimization": false
+}

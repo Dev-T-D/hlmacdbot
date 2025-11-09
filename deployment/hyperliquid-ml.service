@@ -1,0 +1,14 @@
+[Unit]
+Description=Hyperliquid ML Data Collection & Training
+After=network.target
+
+[Service]
+Type=simple
+User=your_username
+WorkingDirectory=/path/to/your/bot
+ExecStart=/path/to/your/bot/.venv/bin/python -m data_collection.hyperliquid_collector
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

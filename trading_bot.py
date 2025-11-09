@@ -67,6 +67,9 @@ from macd_strategy import MACDStrategy
 from order_flow_analyzer import OrderFlowAnalyzer
 from smart_order_router import SmartOrderRouter
 from ml_signal_enhancer import MLSignalEnhancer
+from signal_confirmation import MultiTimeframeConfirmation, VolumeQualityFilter, MarketRegimeFilter
+from filter_statistics import FilterStatistics
+from exit_strategies import PartialProfitTaker, VolatilityAdaptiveTrailingStop, TimeBasedExit
 from kelly_calculator import KellyCalculator
 from mae_analyzer import MAEAnalyzer
 from advanced_risk_manager import AdvancedRiskManager
@@ -366,6 +369,20 @@ class TradingBot:
             logger.info("✅ ML signal enhancement enabled")
         else:
             logger.warning("⚠️ ML models not available - using traditional signals")
+
+        # Initialize signal quality filters
+        self.mtf_confirmation = MultiTimeframeConfirmation()
+        self.volume_filter = VolumeQualityFilter()
+        self.regime_filter = MarketRegimeFilter()
+        self.filter_stats = FilterStatistics()
+
+        logger.info("✅ Signal quality filters initialized")
+
+        # Initialize exit strategies
+        self.partial_profit = PartialProfitTaker(levels=[0.5, 1.0, 1.5, 2.0])
+        self.volatility_trailing = VolatilityAdaptiveTrailingStop(atr_multiplier=2.5)
+        self.time_exit = TimeBasedExit(max_hold_hours=24)
+        logger.info("✅ Exit strategies initialized")
 
         # Initialize advanced risk manager
         risk_config = self.config.get("advanced_risk", {})
@@ -1712,6 +1729,7 @@ class TradingBot:
                     "type": position_type,
                     "entry_price": exchange_entry_price,
                     "quantity": exchange_qty,
+                    "original_quantity": exchange_qty,  # For partial profit tracking
                     "stop_loss": (
                         exchange_entry_price * 0.98
                         if position_type == "LONG"
@@ -1881,7 +1899,7 @@ class TradingBot:
 
             # Use advanced risk manager for position sizing
             existing_positions = [self.current_position] if self.current_position else []
-            ml_confidence = signal.get('ml_probability', 0.5) if 'ml_probability' in signal else 1.0
+            ml_confidence = signal.get('confidence', 1.0)  # Use filter-adjusted confidence
 
             # Get market data for risk calculations
             market_data = {
@@ -1989,6 +2007,7 @@ class TradingBot:
             "type": order_details["position_type"],
             "entry_price": order_details["entry_price"],
             "quantity": float(order_details["quantity"]),
+            "original_quantity": float(order_details["quantity"]),  # For partial profit tracking
             "stop_loss": order_details["stop_loss"],
             "take_profit": order_details["take_profit"],
             "entry_time": datetime.now(timezone.utc),
@@ -2151,6 +2170,7 @@ class TradingBot:
                             "type": order_info["position_type"],
                             "entry_price": order_info["entry_price"],
                             "quantity": float(order_info["quantity"]),
+                            "original_quantity": float(order_info["quantity"]),  # For partial profit tracking
                             "stop_loss": float(order_info["stop_loss"]),
                             "take_profit": float(order_info["take_profit"]),
                             "entry_time": datetime.now(),
@@ -2314,7 +2334,7 @@ class TradingBot:
         return False, ""
 
     def check_exit_conditions(self, df: pd.DataFrame) -> tuple:
-        """Check if position should be closed."""
+        """Enhanced exit logic with multiple strategies"""
         if not self.current_position:
             return False, ""
 
@@ -2329,24 +2349,114 @@ class TradingBot:
         else:
             current_price = df.iloc[-1]["close"]
 
-        # Check trailing stop first (highest priority if enabled)
-        if self.trailing_stop_enabled and self.trailing_stop:
-            stop_hit, reason = self.trailing_stop.check_stop_hit(current_price)
-            if stop_hit:
-                return True, reason
+        position = self.current_position
+        current_time = datetime.now(timezone.utc)
 
-        # Check strategy exit signals
-        should_exit, reason = self.strategy.check_exit_signal(df, self.current_position["type"])
+        # Update position with current price for unrealized P&L
+        side = position['type']
+        entry_price = position['entry_price']
+        if side == 'LONG':
+            unrealized_pnl = (current_price - entry_price) * position.get('quantity', 0)
+        else:  # SHORT
+            unrealized_pnl = (entry_price - current_price) * position.get('quantity', 0)
+
+        position['unrealized_pnl'] = unrealized_pnl
+
+        # STRATEGY 1: Partial Profit Taking
+        profit_actions = self.partial_profit.check_profit_levels(position, current_price)
+
+        for action in profit_actions:
+            logger.info(".1f")
+            logger.info(".0f")
+
+            # Close partial position
+            self._close_partial_position(
+                action['quantity'],
+                current_price,
+                f"Take Profit {action['r_multiple']}R"
+            )
+
+        # STRATEGY 2: Volatility-Adaptive Trailing Stop
+        new_stop = self.volatility_trailing.update_trailing_stop(position, current_price, df)
+
+        if new_stop != position['stop_loss']:
+            old_stop = position['stop_loss']
+            position['stop_loss'] = new_stop
+
+            logger.info(".2f")
+
+            # Update stop loss on exchange (if applicable and not dry run)
+            if not self.dry_run:
+                try:
+                    self.client.update_stop_loss(
+                        symbol=self.symbol,
+                        new_stop_loss=str(new_stop),
+                        take_profit=str(position.get("take_profit", "")),
+                    )
+                    logger.debug(f"Updated stop loss on exchange to ${new_stop:.2f}")
+                except Exception as e:
+                    logger.error(f"Failed to update stop-loss on exchange: {e}")
+
+        # STRATEGY 3: Check if stop loss hit
+        if side == 'LONG' and current_price <= position['stop_loss']:
+            logger.warning(".2f")
+            self.close_position("Stop Loss", current_price)
+            return True, "Stop Loss Hit"
+
+        elif side == 'SHORT' and current_price >= position['stop_loss']:
+            logger.warning(".2f")
+            self.close_position("Stop Loss", current_price)
+            return True, "Stop Loss Hit"
+
+        # STRATEGY 4: Time-Based Exit
+        should_exit, reason = self.time_exit.should_exit_by_time(position, current_time)
 
         if should_exit:
+            logger.info(f"⏰ Time-Based Exit: {reason}")
+            self.close_position(reason, current_price)
             return True, reason
 
-        # In dry run, manually check TP/SL from price (using current_position values)
-        should_exit, reason = self._check_dry_run_tp_sl(current_price)
+        # Check strategy exit signals (MACD crossover, etc.)
+        should_exit, reason = self.strategy.check_exit_signal(df, position["type"])
+
         if should_exit:
             return True, reason
 
         return False, ""
+
+    def _close_partial_position(self, quantity, price, reason):
+        """Close partial position"""
+        position = self.current_position
+
+        # Calculate P&L for this partial close
+        if position['type'] == 'LONG':
+            pnl = (price - position['entry_price']) * quantity
+        else:
+            pnl = (position['entry_price'] - price) * quantity
+
+        # Update position quantity
+        position['quantity'] -= quantity
+
+        # Record partial close
+        self._record_trade_event({
+            'type': 'partial_close',
+            'quantity': quantity,
+            'price': price,
+            'pnl': pnl,
+            'reason': reason,
+            'remaining_quantity': position['quantity']
+        })
+
+        # Check if position fully closed
+        if position['quantity'] <= 0:
+            self.close_position(f"Final Partial Close: {reason}", price)
+
+    def _record_trade_event(self, event_data):
+        """Record trade event for analytics"""
+        logger.debug(f"Trade event: {event_data}")
+
+        # Could extend this to store in database or send to analytics service
+        # For now, just log it
 
     def _enhance_signal_with_microstructure(self, signal: Dict, df: pd.DataFrame) -> Optional[Dict]:
         """
@@ -3030,58 +3140,84 @@ class TradingBot:
                 )
 
                 # Look for entry signals (requires indicators)
-                signal = self.strategy.check_entry_signal(df)
+                macd_signal = self.strategy.check_entry_signal(df)
 
-                if signal:
-                    # Enhance signal with market microstructure analysis
-                    microstructure_signal = self._enhance_signal_with_microstructure(signal, df)
-                    if microstructure_signal:
-                        signal = microstructure_signal
+                if macd_signal:
+                    logger.info(f"📊 MACD Signal Detected: {macd_signal['type']} @ ${macd_signal['entry_price']:.2f}")
+
+                    # ==========================================
+                    # 4-LAYER SIGNAL QUALITY FILTER CASCADE
+                    # ==========================================
+
+                    # Get ML prediction for enhanced analysis
+                    ml_prediction = self.ml_enhancer.predict_direction(df) if self.ml_enabled else {}
+
+                    # FILTER LAYER 1: ML Confidence & MACD Agreement
+                    should_trade, confidence, reason = self.ml_enhancer.should_trade(
+                        macd_signal['type'], ml_prediction, current_price
+                    )
+
+                    # Record filter result
+                    self.filter_stats.record_filter_result('ml_confidence', should_trade, macd_signal['type'])
+
+                    if not should_trade:
+                        logger.debug(f"❌ Filter 1 Failed: {reason}")
+                        signal = None
                     else:
-                        signal = None  # Microstructure analysis rejected the signal
+                        logger.info(f"✅ Filter 1 Passed: Confidence {confidence:.2f}")
 
-                    # Further enhance with ML models if available
-                    if signal and self.ml_enabled:
-                        ml_enhanced_signal = self._enhance_signal_with_ml(signal, df)
-                        if ml_enhanced_signal:
-                            signal = ml_enhanced_signal
+                        # FILTER LAYER 2: Multi-Timeframe Confirmation
+                        mtf_aligned, mtf_score, mtf_details = self.mtf_confirmation.check_alignment(
+                            self.symbol, macd_signal['type'], self.client
+                        )
+
+                        # Record filter result
+                        self.filter_stats.record_filter_result('mtf_alignment', mtf_aligned, macd_signal['type'])
+
+                        if not mtf_aligned:
+                            logger.debug(f"❌ Filter 2 Failed: MTF alignment score {mtf_score:.2f}")
+                            signal = None
                         else:
-                            signal = None  # ML enhancement rejected the signal
-                    # Multi-timeframe analysis: Check higher timeframe trend
-                    if self.multi_timeframe_enabled:
-                        df_higher_tf = self.get_higher_timeframe_data()
+                            logger.info(f"✅ Filter 2 Passed: MTF aligned ({mtf_score:.2f})")
 
-                        if df_higher_tf is not None:
-                            is_aligned, reason = self.strategy.check_higher_timeframe_trend(
-                                df_higher_tf, signal["type"]
-                            )
+                            # FILTER LAYER 3: Volume Quality
+                            volume_ok, volume_ratio, volume_reason = self.volume_filter.check_volume_quality(df)
 
-                            if not is_aligned:
-                                logger.info(
-                                    f"⏸️ Entry signal rejected by multi-timeframe "
-                                    f"analysis: {reason}"
-                                )
-                                logger.info(
-                                    f"   Signal: {signal['type']} @ ${signal['entry_price']:.2f}"
-                                )
-                                logger.info(f"   Higher TF ({self.higher_timeframe}): {reason}")
-                                # Skip entry - higher timeframe doesn't support it
+                            # Record filter result
+                            self.filter_stats.record_filter_result('volume_quality', volume_ok, macd_signal['type'])
+
+                            if not volume_ok:
+                                logger.debug(f"❌ Filter 3 Failed: {volume_reason}")
                                 signal = None
                             else:
-                                logger.info(
-                                    f"✅ Multi-timeframe analysis confirms entry signal: {reason}"
+                                logger.info(f"✅ Filter 3 Passed: Volume {volume_ratio:.2f}x average")
+
+                                # FILTER LAYER 4: Market Regime
+                                current_regime = self.regime_detector.detect_regime(df)
+                                regime_ok, regime_reason = self.regime_filter.check_regime_suitability(
+                                    current_regime, macd_signal['type']
                                 )
-                                logger.info(
-                                    f"   Signal: {signal['type']} @ ${signal['entry_price']:.2f}"
-                                )
-                                logger.info(f"   Higher TF ({self.higher_timeframe}): {reason}")
-                        else:
-                            logger.warning(
-                                "⚠️ Multi-timeframe enabled but higher timeframe "
-                                "data unavailable - proceeding without confirmation"
-                            )
-                            # Continue with signal if higher TF data unavailable
-                            # (don't block trading)
+
+                                # Record filter result
+                                self.filter_stats.record_filter_result('market_regime', regime_ok, macd_signal['type'])
+
+                                if not regime_ok:
+                                    logger.debug(f"❌ Filter 4 Failed: {regime_reason}")
+                                    signal = None
+                                else:
+                                    logger.info(f"✅ Filter 4 Passed: {regime_reason}")
+
+                                    # ALL FILTERS PASSED - Create final signal
+                                    logger.info(f"🎯 ALL FILTERS PASSED - Opening {macd_signal['type']} position")
+                                    signal = {
+                                        'type': macd_signal['type'],
+                                        'entry_price': macd_signal['entry_price'],
+                                        'confidence': confidence,
+                                        'filters_passed': ['ml_confidence', 'mtf_alignment', 'volume_quality', 'market_regime'],
+                                        'ml_prediction': ml_prediction,
+                                        'regime': current_regime,
+                                        'volume_ratio': volume_ratio
+                                    }
 
                 if signal:
                     # Get balance

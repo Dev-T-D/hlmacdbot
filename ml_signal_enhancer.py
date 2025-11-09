@@ -31,8 +31,12 @@ try:
 except ImportError:
     SHAP_AVAILABLE = False
 
-from feature_engineering import FeatureEngineer
+from feature_engineering import AdvancedFeatureEngine
+from ml.feature_pipeline import FeaturePipeline
+from ml.feature_selector import FeatureSelector
 from ml_training_pipeline import MLTrainingPipeline
+from ml_inference_engine import OptimizedMLInferenceEngine
+from optimized_feature_engine import OptimizedFeatureEngine
 
 logger = logging.getLogger(__name__)
 
@@ -49,20 +53,53 @@ class MLSignalEnhancer:
     - Provide explainability for trading decisions
     """
 
-    def __init__(self, symbol: str = 'BTCUSDT', config: Optional[Dict] = None):
+    def __init__(self, symbol: str = 'BTCUSDT', config: Optional[Dict] = None, min_confidence: float = 0.65):
         """
         Initialize the ML signal enhancer.
 
         Args:
             symbol: Trading symbol
             config: Configuration dictionary
+            min_confidence: Minimum prediction confidence to generate signal (0.5-0.8)
         """
         self.symbol = symbol
         self.config = config or self._get_default_config()
+        self.min_confidence = min_confidence
 
         # Initialize components
-        self.feature_engineer = FeatureEngineer(self.config.get('feature_engineering', {}))
+        # Initialize advanced feature engineering pipeline
+        self.feature_engine = AdvancedFeatureEngine(self.config.get('feature_engineering', {}))
+        self.feature_selector = FeatureSelector(method='hybrid')
+        self.feature_pipeline = FeaturePipeline(
+            feature_engine=self.feature_engine,
+            feature_selector=self.feature_selector,
+            scaler='robust'
+        )
+
+        # Try to load fitted pipeline if available
+        try:
+            pipeline_path = f"models/{symbol}/feature_pipeline.pkl"
+            if os.path.exists(pipeline_path):
+                self.feature_pipeline.load(pipeline_path)
+                logger.info(f"Loaded fitted feature pipeline from {pipeline_path}")
+            else:
+                logger.warning(f"No fitted pipeline found at {pipeline_path}")
+        except Exception as e:
+            logger.warning(f"Could not load fitted pipeline: {e}")
         self.training_pipeline = MLTrainingPipeline(symbol, self.config.get('training', {}))
+
+        # Initialize optimized engines for production inference
+        self.optimized_feature_engine = OptimizedFeatureEngine()
+        self.optimized_inference_engine = None  # Will be initialized when loading models
+
+        # Track prediction accuracy by confidence level
+        self.confidence_buckets = {
+            '0.50-0.60': [],
+            '0.60-0.70': [],
+            '0.70-0.80': [],
+            '0.80-0.90': [],
+            '0.90-1.00': []
+        }
 
         # Model state
         self.models = {}
@@ -126,13 +163,36 @@ class MLSignalEnhancer:
             True if models loaded successfully
         """
         try:
+            logger.info(f"Attempting to load ML models for {self.symbol}")
             success = self.training_pipeline.load_models()
+            logger.info(f"Model loading success: {success}")
 
             if success:
                 self.models = self.training_pipeline.models
                 self.model_metadata = self.training_pipeline.model_metadata
                 self.feature_columns = self.training_pipeline.feature_columns
                 self.models_loaded = True
+
+                # Initialize optimized inference engine for production use (optional)
+                try:
+                    # Check if ONNX models exist
+                    onnx_paths = [
+                        f'models/onnx/lightgbm.onnx',
+                        f'models/onnx/xgboost.onnx',
+                        f'models/onnx/random_forest.onnx',
+                        f'models/onnx/lstm.onnx'
+                    ]
+                    if all(os.path.exists(path) for path in onnx_paths):
+                        model_configs = {name.split('/')[-1].replace('.onnx', ''): path for path in onnx_paths}
+                        self.optimized_inference_engine = OptimizedMLInferenceEngine(model_configs)
+                        logger.info("✅ Optimized ONNX inference engine initialized")
+                    else:
+                        logger.info("ONNX models not found - using standard sklearn inference")
+                        self.optimized_inference_engine = None
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to initialize optimized inference engine: {e}")
+                    logger.warning("Using standard sklearn inference")
+                    self.optimized_inference_engine = None
 
                 # Update monitoring stats
                 if self.model_metadata.get('training_date'):
@@ -200,50 +260,116 @@ class MLSignalEnhancer:
             if not self.is_model_available():
                 return self._fallback_prediction()
 
-            # Engineer features
-            features_df = self.feature_engineer.engineer_features(
-                market_data,
-                orderbook_data=orderbook_data,
-                trade_flow_data=trade_flow_data,
-                funding_rates=funding_rates
+            # Use optimized engines if available (production mode)
+            if self.optimized_inference_engine is not None:
+                return self._predict_direction_optimized(
+                    market_data, orderbook_data, trade_flow_data, funding_rates, start_time
+                )
+
+            # Fallback to original method for compatibility
+            return self._predict_direction_legacy(
+                market_data, orderbook_data, trade_flow_data, funding_rates, start_time
             )
-
-            # Prepare features for ML models
-            feature_values = features_df[self.feature_columns].iloc[-1:].values  # Last row
-            feature_values = np.nan_to_num(feature_values, nan=0.0, posinf=0.0, neginf=0.0)
-
-            # Get ensemble prediction
-            ensemble_prob = self.training_pipeline.get_ensemble_predictions(feature_values)[0]
-
-            # Calculate confidence metrics
-            confidence_metrics = self._calculate_confidence_metrics(ensemble_prob)
-
-            # Get feature importance if available
-            feature_importance = self._get_feature_importance(features_df.iloc[-1:], feature_values)
-
-            # Calculate inference time
-            inference_time = time.time() - start_time
-
-            prediction_result = {
-                'direction_probability': ensemble_prob,
-                'predicted_direction': 'UP' if ensemble_prob > 0.5 else 'DOWN',
-                'confidence_level': confidence_metrics['level'],
-                'position_size_multiplier': confidence_metrics['position_multiplier'],
-                'kelly_fraction': confidence_metrics['kelly_fraction'],
-                'feature_importance': feature_importance,
-                'inference_time_ms': inference_time * 1000,
-                'model_available': True,
-                'timestamp': datetime.now()
-            }
-
-            # Store prediction for monitoring
-            self._store_prediction(prediction_result)
-
-            logger.debug(".4f"            return prediction_result
 
         except Exception as e:
             logger.error(f"Error in ML prediction: {e}")
             return self._fallback_prediction()
+
+    def _predict_direction_optimized(self, market_data: pd.DataFrame,
+                                   orderbook_data: Optional[Dict] = None,
+                                   trade_flow_data: Optional[Dict] = None,
+                                   funding_rates: Optional[List[Dict]] = None,
+                                   start_time: float = None) -> Dict[str, Any]:
+        """
+        Optimized prediction using ONNX models and fast feature computation.
+        """
+        if start_time is None:
+            start_time = time.time()
+
+        # Fast feature computation (<20ms)
+        features = self.optimized_feature_engine.compute_features_fast(market_data, self.symbol)
+
+        # Fast ensemble inference (<30ms)
+        inference_result = self.optimized_inference_engine.predict_ensemble(features)
+
+        # Calculate confidence metrics
+        confidence_metrics = self._calculate_confidence_metrics(inference_result['probability'])
+
+        prediction_result = {
+            'direction_probability': inference_result['probability'],
+            'predicted_direction': 'UP' if inference_result['probability'] > 0.5 else 'DOWN',
+            'confidence_level': confidence_metrics['level'],
+            'position_size_multiplier': confidence_metrics['position_multiplier'],
+            'kelly_fraction': confidence_metrics['kelly_fraction'],
+            'feature_importance': {},  # Not available with ONNX models
+            'inference_time_ms': inference_result['latency_ms'],
+            'model_available': True,
+            'optimization_level': 'onnx',
+            'individual_predictions': inference_result['individual_predictions'],
+            'ensemble_confidence': inference_result['confidence'],
+            'timestamp': datetime.now()
+        }
+
+        # Store prediction for monitoring
+        self._store_prediction(prediction_result)
+
+        logger.debug(f"Prediction completed - confidence: {inference_result['confidence']:.4f}")
+        return prediction_result
+
+    def _predict_direction_legacy(self, market_data: pd.DataFrame,
+                                orderbook_data: Optional[Dict] = None,
+                                trade_flow_data: Optional[Dict] = None,
+                                funding_rates: Optional[List[Dict]] = None,
+                                start_time: float = None) -> Dict[str, Any]:
+        """
+        Legacy prediction method using original sklearn models.
+        """
+        if start_time is None:
+            start_time = time.time()
+
+        # Engineer features
+        # Use advanced feature engineering
+        features_df = self.feature_engine.create_all_features(market_data)
+
+        # Prepare features for ML models - use all available features if feature_columns not set
+        if not self.feature_columns:
+            self.feature_columns = [col for col in features_df.columns
+                                  if col not in ['open', 'high', 'low', 'close', 'volume', 'target']]
+            logger.warning(f"No feature columns loaded, using all {len(self.feature_columns)} features")
+
+        feature_values = features_df[self.feature_columns].iloc[-1:].values  # Last row
+        feature_values = np.nan_to_num(feature_values, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Get ensemble prediction
+        ensemble_prob = self.training_pipeline.get_ensemble_predictions(feature_values)[0]
+
+        # Calculate confidence metrics
+        confidence_metrics = self._calculate_confidence_metrics(ensemble_prob)
+
+        # Get feature importance if available
+        feature_importance = self._get_feature_importance(features_df.iloc[-1:], feature_values)
+
+        # Calculate inference time
+        inference_time = time.time() - start_time
+
+        prediction_result = {
+            'direction_probability': ensemble_prob,
+            'predicted_direction': 'UP' if ensemble_prob > 0.5 else 'DOWN',
+            'confidence_level': confidence_metrics['level'],
+            'position_size_multiplier': confidence_metrics['position_multiplier'],
+            'kelly_fraction': confidence_metrics['kelly_fraction'],
+            'feature_importance': feature_importance,
+            'inference_time_ms': inference_time * 1000,
+            'model_available': True,
+            'optimization_level': 'legacy',
+            'timestamp': datetime.now()
+        }
+
+        # Store prediction for monitoring
+        self._store_prediction(prediction_result)
+
+        logger.debug(f"Prediction completed - confidence: {inference_result['confidence']:.4f}")
+        return prediction_result
 
     def _fallback_prediction(self) -> Dict[str, Any]:
         """Return fallback prediction when ML models are unavailable."""
@@ -332,9 +458,9 @@ class MLSignalEnhancer:
     # ==========================================
 
     def should_trade(self, macd_signal: str, ml_prediction: Dict[str, Any],
-                    current_price: float) -> Tuple[bool, Dict[str, Any]]:
+                    current_price: float) -> Tuple[bool, float, str]:
         """
-        Determine if trading should proceed based on MACD signal and ML prediction.
+        Determine if should trade based on ML confidence and MACD agreement.
 
         Args:
             macd_signal: MACD signal ('LONG', 'SHORT', or None)
@@ -342,72 +468,108 @@ class MLSignalEnhancer:
             current_price: Current market price
 
         Returns:
-            Tuple of (should_trade, enhanced_signal_info)
+            Tuple of (should_trade, adjusted_confidence, reason)
         """
         try:
             if not macd_signal:
-                return False, {'reason': 'No MACD signal'}
+                return False, 0.0, 'No MACD signal'
 
-            if not ml_prediction.get('model_available', False):
-                # Fallback to MACD-only trading
-                if self.config['inference']['fallback_enabled']:
-                    logger.info("ML model unavailable - falling back to MACD-only trading")
-                    return True, {
-                        'signal_type': 'macd_fallback',
-                        'position_size_multiplier': 1.0,
-                        'confidence_level': 'macd_only'
-                    }
-                else:
-                    return False, {'reason': 'ML model unavailable and fallback disabled'}
+            probability = ml_prediction.get('direction_probability', 0.5)
+            confidence = ml_prediction.get('confidence_level', 'none')
 
-            # Check if ML prediction agrees with MACD signal
-            macd_direction = 1 if macd_signal == 'LONG' else -1
-            ml_probability = ml_prediction['direction_probability']
-            ml_direction = 1 if ml_probability > 0.5 else -1
+            # Convert confidence level to numeric
+            confidence_numeric = 0.5
+            if isinstance(confidence, str):
+                if confidence == 'high':
+                    confidence_numeric = 0.8
+                elif confidence == 'medium':
+                    confidence_numeric = 0.65
+                elif confidence == 'low':
+                    confidence_numeric = 0.55
+            else:
+                confidence_numeric = float(confidence) if confidence != 'none' else 0.5
 
-            agreement = macd_direction == ml_direction
+            # FILTER 1: ML Confidence Threshold
+            if confidence_numeric < self.min_confidence:
+                return False, confidence_numeric, f"ML confidence too low ({confidence_numeric:.2f} < {self.min_confidence})"
 
-            if not agreement:
-                logger.info(f"MACD ({macd_signal}) and ML ({ml_prediction['predicted_direction']}) disagree - skipping trade")
-                return False, {
-                    'reason': 'Signal disagreement',
-                    'macd_signal': macd_signal,
-                    'ml_direction': ml_prediction['predicted_direction'],
-                    'ml_probability': ml_probability
-                }
+            # FILTER 2: ML-MACD Agreement
+            ml_direction = 'LONG' if probability > 0.5 else 'SHORT'
 
-            # Check ML confidence threshold
-            confidence_level = ml_prediction['confidence_level']
-            if confidence_level == 'insufficient':
-                logger.info(f"ML confidence too low ({ml_probability:.3f}) - skipping trade")
-                return False, {
-                    'reason': 'Insufficient ML confidence',
-                    'ml_probability': ml_probability,
-                    'confidence_level': confidence_level
-                }
+            if ml_direction != macd_signal:
+                return False, confidence_numeric, f"ML-MACD disagreement (ML: {ml_direction}, MACD: {macd_signal})"
 
-            # Trade approved
+            # FILTER 3: Strong ML Signal (probability far from 0.5)
+            if macd_signal == 'LONG':
+                if probability < 0.60:  # Require at least 60% probability for LONG
+                    return False, confidence_numeric, f"ML probability too weak for LONG ({probability:.2f})"
+            else:  # SHORT
+                if probability > 0.40:  # Require at most 40% probability for SHORT
+                    return False, confidence_numeric, f"ML probability too weak for SHORT ({probability:.2f})"
+
+            # FILTER 4: Model Consensus (all models should agree direction)
+            individual_preds = ml_prediction.get('individual_predictions', {})
+            if len(individual_preds) > 0:
+                long_votes = sum(1 for p in individual_preds.values() if p > 0.5)
+                consensus_pct = long_votes / len(individual_preds)
+
+                if ml_direction == 'LONG' and consensus_pct < 0.75:
+                    return False, confidence_numeric, f"Insufficient model consensus for LONG ({consensus_pct:.2f})"
+                elif ml_direction == 'SHORT' and consensus_pct > 0.25:
+                    return False, confidence_numeric, f"Insufficient model consensus for SHORT ({consensus_pct:.2f})"
+
+            # ALL FILTERS PASSED - Calculate adjusted confidence
+            adjusted_confidence = confidence_numeric * abs(probability - 0.5) * 2  # Scale by distance from 0.5
+
+            # Enhanced signal info
             enhanced_signal = {
-                'signal_type': 'ml_enhanced',
+                'signal_type': 'ml_enhanced_filtered',
                 'macd_signal': macd_signal,
-                'ml_probability': ml_probability,
-                'ml_direction': ml_prediction['predicted_direction'],
-                'confidence_level': confidence_level,
-                'position_size_multiplier': ml_prediction['position_size_multiplier'],
-                'kelly_fraction': ml_prediction['kelly_fraction'],
+                'ml_probability': probability,
+                'ml_direction': ml_direction,
+                'confidence_level': confidence_numeric,
+                'adjusted_confidence': adjusted_confidence,
+                'position_size_multiplier': ml_prediction.get('position_size_multiplier', 1.0),
+                'kelly_fraction': ml_prediction.get('kelly_fraction', 0.0),
                 'feature_importance': ml_prediction.get('feature_importance', {}),
-                'agreement_score': agreement
+                'model_consensus': consensus_pct if len(individual_preds) > 0 else 1.0
             }
 
-            logger.info(f"✅ Trade approved: {macd_signal} with {confidence_level} ML confidence "
-                       f"({ml_probability:.3f}), position size: {ml_prediction['position_size_multiplier']:.1f}x")
+            logger.info(f"🎯 ALL FILTERS PASSED - Opening {macd_signal} position with confidence {adjusted_confidence:.2f}")
 
-            return True, enhanced_signal
+            return True, adjusted_confidence, "All filters passed"
 
         except Exception as e:
             logger.error(f"Error in should_trade decision: {e}")
-            # Default to conservative approach on error
-            return False, {'reason': f'Error in signal integration: {e}'}
+            return False, 0.0, f'Error in signal integration: {e}'
+
+    def record_outcome(self, prediction_confidence: float, actual_outcome: int) -> None:
+        """Track prediction accuracy by confidence level"""
+        # Determine confidence bucket
+        if 0.50 <= prediction_confidence < 0.60:
+            bucket = '0.50-0.60'
+        elif 0.60 <= prediction_confidence < 0.70:
+            bucket = '0.60-0.70'
+        elif 0.70 <= prediction_confidence < 0.80:
+            bucket = '0.70-0.80'
+        elif 0.80 <= prediction_confidence < 0.90:
+            bucket = '0.80-0.90'
+        else:
+            bucket = '0.90-1.00'
+
+        self.confidence_buckets[bucket].append(actual_outcome)
+
+    def get_confidence_statistics(self) -> Dict[str, Dict[str, float]]:
+        """Get win rate by confidence bucket"""
+        stats = {}
+        for bucket, outcomes in self.confidence_buckets.items():
+            if len(outcomes) > 0:
+                win_rate = sum(outcomes) / len(outcomes)
+                stats[bucket] = {
+                    'win_rate': win_rate,
+                    'count': len(outcomes)
+                }
+        return stats
 
     # ==========================================
     # MODEL MONITORING AND PERFORMANCE

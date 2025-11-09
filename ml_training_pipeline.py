@@ -41,7 +41,9 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("TensorFlow not available - LSTM model disabled")
 
-from feature_engineering import FeatureEngineer
+from feature_engineering import AdvancedFeatureEngine
+from ml.feature_pipeline import FeaturePipeline
+from ml.feature_selector import FeatureSelector
 from hyperliquid_client import HyperliquidClient
 
 logger = logging.getLogger(__name__)
@@ -70,10 +72,18 @@ class MLTrainingPipeline:
         self.client = HyperliquidClient(
             private_key="dummy",  # Not needed for historical data
             wallet_address="dummy",
-            testnet=True
+            testnet=True,
+            demo_mode=True  # Skip credential validation for historical data
         )
 
-        self.feature_engineer = FeatureEngineer(self.config.get('feature_engineering', {}))
+        # Initialize advanced feature engineering pipeline
+        self.feature_engine = AdvancedFeatureEngine(self.config)
+        self.feature_selector = FeatureSelector(method='hybrid')
+        self.feature_pipeline = FeaturePipeline(
+            feature_engine=self.feature_engine,
+            feature_selector=self.feature_selector,
+            scaler='robust'
+        )
 
         # Model storage
         self.models = {}
@@ -82,6 +92,7 @@ class MLTrainingPipeline:
         # Training data storage
         self.training_data = None
         self.feature_columns = []
+        self.pipeline_fitted = False
 
         logger.info(f"ML Training Pipeline initialized for {symbol}")
 
@@ -95,14 +106,12 @@ class MLTrainingPipeline:
                 'cache_dir': 'data/ml_cache'
             },
             'feature_engineering': {
-                'technical': {
-                    'ema_periods': [9, 21, 50, 200],
-                    'rsi_periods': [14, 21],
-                    'bollinger_period': 20,
-                    'bollinger_std': 2.0,
-                    'atr_period': 14,
-                    'adx_period': 14
-                }
+                'enabled_categories': ['price', 'volume', 'volatility', 'momentum', 'trend', 'pattern', 'time', 'statistical', 'interaction'],
+                'numba_enabled': True,
+                'talib_enabled': True,
+                'cache_enabled': True,
+                'max_cache_size': 1000,
+                'target_features': 50  # Number of features to select
             },
             'training': {
                 'test_size': 0.15,
@@ -275,26 +284,52 @@ class MLTrainingPipeline:
             return data
 
     def _engineer_features_for_training(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Engineer features for ML training."""
+        """Engineer features for ML training using advanced pipeline."""
         try:
-            # Use the feature engineering pipeline
-            feature_data = self.feature_engineer.engineer_features(
-                data,
-                orderbook_data=None,  # Would be populated with historical order book data
-                trade_flow_data=None,  # Would be populated with historical trade flow data
-                funding_rates=None     # Would be populated with historical funding rates
+            logger.info("🔧 Engineering features using advanced pipeline...")
+
+            # Prepare data for feature engineering
+            feature_data = data.copy()
+
+            # Extract target variable
+            target_col = 'target'
+            if target_col not in feature_data.columns:
+                logger.error(f"Target column '{target_col}' not found in data")
+                return data
+
+            target = feature_data[target_col]
+
+            # Select only OHLCV columns for feature engineering
+            ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
+            ohlcv_data = feature_data[ohlcv_cols].copy()
+
+            # Apply advanced feature engineering pipeline
+            n_features = self.config.get('feature_engineering', {}).get('target_features', 50)
+            X_features = self.feature_pipeline.fit_transform(
+                ohlcv_data, target, n_features=n_features, remove_collinear=True
             )
 
+            # Add back the target and other metadata columns
+            result_data = pd.DataFrame(X_features, index=ohlcv_data.index)
+            result_data[target_col] = target
+
+            # Add back timestamp if it exists
+            if 'timestamp' in feature_data.columns:
+                result_data['timestamp'] = feature_data['timestamp']
+
             # Store feature column names
-            exclude_cols = ['timestamp', 'target', 'future_return']
-            self.feature_columns = [col for col in feature_data.columns if col not in exclude_cols]
+            self.feature_columns = list(X_features.columns)
+            self.pipeline_fitted = True
 
-            logger.info(f"Engineered {len(self.feature_columns)} features for training")
+            logger.info(f"✅ Engineered {len(self.feature_columns)} advanced features for training")
+            logger.info(f"   Features selected: {self.feature_columns[:5]}...")
 
-            return feature_data
+            return result_data
 
         except Exception as e:
-            logger.error(f"Error engineering features: {e}")
+            logger.error(f"Error engineering features with advanced pipeline: {e}")
+            import traceback
+            traceback.print_exc()
             return data
 
     def _save_training_data(self, data: pd.DataFrame) -> None:
@@ -314,6 +349,94 @@ class MLTrainingPipeline:
     # ==========================================
     # MODEL TRAINING
     # ==========================================
+
+    def train_models_with_split_data(self, X_train: pd.DataFrame, y_train: pd.Series,
+                                   X_val: pd.DataFrame, y_val: pd.Series) -> Dict[str, Any]:
+        """
+        Train all ML models with pre-split training and validation data.
+
+        Args:
+            X_train: Training features
+            y_train: Training labels
+            X_val: Validation features
+            y_val: Validation labels
+
+        Returns:
+            Dictionary with trained models and metadata
+        """
+        try:
+            logger.info("Starting ensemble model training with split data...")
+
+            # Train individual models
+            models = {}
+            metrics = {}
+
+            # LightGBM
+            logger.info("Training LightGBM model...")
+            model_lgb = self._train_lightgbm(X_train.values, y_train.values)
+            models['lightgbm'] = model_lgb
+
+            # Evaluate
+            pred_lgb = model_lgb.predict(X_val.values)
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+            metrics['lightgbm'] = {
+                'accuracy': accuracy_score(y_val, pred_lgb),
+                'precision': precision_score(y_val, pred_lgb, zero_division=0),
+                'recall': recall_score(y_val, pred_lgb, zero_division=0),
+                'f1_score': f1_score(y_val, pred_lgb, zero_division=0),
+                'auc': roc_auc_score(y_val, model_lgb.predict_proba(X_val.values)[:, 1])
+            }
+
+            # XGBoost
+            logger.info("Training XGBoost model...")
+            model_xgb = self._train_xgboost(X_train.values, y_train.values)
+            models['xgboost'] = model_xgb
+
+            pred_xgb = model_xgb.predict(X_val.values)
+            metrics['xgboost'] = {
+                'accuracy': accuracy_score(y_val, pred_xgb),
+                'precision': precision_score(y_val, pred_xgb, zero_division=0),
+                'recall': recall_score(y_val, pred_xgb, zero_division=0),
+                'f1_score': f1_score(y_val, pred_xgb, zero_division=0),
+                'auc': roc_auc_score(y_val, model_xgb.predict_proba(X_val.values)[:, 1])
+            }
+
+            # Random Forest
+            logger.info("Training Random Forest model...")
+            model_rf = self._train_random_forest(X_train.values, y_train.values)
+            models['random_forest'] = model_rf
+
+            pred_rf = model_rf.predict(X_val.values)
+            metrics['random_forest'] = {
+                'accuracy': accuracy_score(y_val, pred_rf),
+                'precision': precision_score(y_val, pred_rf, zero_division=0),
+                'recall': recall_score(y_val, pred_rf, zero_division=0),
+                'f1_score': f1_score(y_val, pred_rf, zero_division=0),
+                'auc': roc_auc_score(y_val, model_rf.predict_proba(X_val.values)[:, 1])
+            }
+
+            # Store models and metadata
+            self.models = models
+            self.model_metadata = {
+                'training_date': datetime.now(),
+                'symbol': getattr(self, 'symbol', 'unknown'),
+                'feature_columns': list(X_train.columns),
+                'models_trained': list(models.keys()),
+                'n_samples': len(X_train),
+                'validation_results': metrics
+            }
+
+            logger.info(f"Ensemble training complete: {len(models)} models trained")
+
+            return {
+                'models': models,
+                'metrics': metrics,
+                'metadata': self.model_metadata
+            }
+
+        except Exception as e:
+            logger.error(f"Error training models: {e}")
+            raise
 
     def train_models(self, data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
@@ -432,7 +555,7 @@ class MLTrainingPipeline:
             auc = roc_auc_score(y_val, val_pred)
             accuracy = accuracy_score(y_val, (val_pred > 0.5).astype(int))
 
-            logger.info(".4f"
+            logger.info(f"LightGBM validation - AUC: {auc:.4f}, Accuracy: {accuracy:.4f}")
             return model
 
         except Exception as e:
@@ -470,7 +593,7 @@ class MLTrainingPipeline:
             auc = roc_auc_score(y_val, val_pred)
             accuracy = accuracy_score(y_val, (val_pred > 0.5).astype(int))
 
-            logger.info(".4f"
+            logger.info(f"XGBoost validation - AUC: {auc:.4f}, Accuracy: {accuracy:.4f}")
             return model
 
         except Exception as e:
@@ -503,7 +626,7 @@ class MLTrainingPipeline:
                 scores.append(auc)
 
             avg_auc = np.mean(scores)
-            logger.info(".4f"
+            logger.info(f"Random Forest CV - Avg AUC: {avg_auc:.4f}")
             return model
 
         except Exception as e:
@@ -577,7 +700,7 @@ class MLTrainingPipeline:
             auc = roc_auc_score(y_val, val_pred)
             accuracy = accuracy_score(y_val, (val_pred > 0.5).astype(int))
 
-            logger.info(".4f"
+            logger.info(f"LSTM validation - AUC: {auc:.4f}, Accuracy: {accuracy:.4f}")
             return model
 
         except Exception as e:
@@ -623,7 +746,7 @@ class MLTrainingPipeline:
 
             logger.info(f"Hyperparameter optimization complete for {model_type}")
             logger.info(f"Best parameters: {study.best_params}")
-            logger.info(".4f"
+            logger.info(f"Best score: {study.best_value:.4f}")
             return study.best_params
 
         except Exception as e:
@@ -880,6 +1003,12 @@ class MLTrainingPipeline:
             with open(feature_path, 'wb') as f:
                 pickle.dump(self.feature_columns, f)
 
+            # Save feature engineering pipeline if fitted
+            if self.pipeline_fitted:
+                pipeline_path = os.path.join(model_dir, "feature_pipeline.pkl")
+                self.feature_pipeline.save(pipeline_path)
+                logger.info(f"Feature pipeline saved to {pipeline_path}")
+
             logger.info(f"Models saved to {model_dir}")
 
         except Exception as e:
@@ -893,21 +1022,69 @@ class MLTrainingPipeline:
             True if models loaded successfully
         """
         try:
-            model_dir = f"models/{self.symbol}"
+            # Use absolute path to ensure we're looking in the right place
+            # Hardcode the path for now to ensure it works
+            model_dir = "/home/ink/bitunix-macd-bot/models/" + self.symbol
+            logger.info(f"Checking for models in directory: {model_dir}")
+            logger.info(f"Directory exists: {os.path.exists(model_dir)}")
+            logger.info(f"Directory contents: {os.listdir(model_dir) if os.path.exists(model_dir) else 'N/A'}")
 
             if not os.path.exists(model_dir):
                 logger.warning(f"No saved models found in {model_dir}")
                 return False
 
-            # Load metadata
+            # Load metadata - try pickle first, then fallback to training summary
             metadata_path = os.path.join(model_dir, "model_metadata.pkl")
-            with open(metadata_path, 'rb') as f:
-                self.model_metadata = pickle.load(f)
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'rb') as f:
+                    self.model_metadata = pickle.load(f)
+            else:
+                # Fallback: create metadata from training summary
+                summary_path = os.path.join(model_dir, "training_summary.json")
+                if os.path.exists(summary_path):
+                    import json
+                    with open(summary_path, 'r') as f:
+                        summary = json.load(f)
+                    self.model_metadata = {
+                        'models_trained': summary.get('models_trained', []),
+                        'training_date': summary.get('training_timestamp'),
+                        'n_samples': summary.get('n_samples', 0),
+                        'validation_results': summary.get('validation_results', {})
+                    }
+                    logger.info(f"Created metadata from training summary: {summary_path}")
+                else:
+                    logger.error(f"No metadata or training summary found in {model_dir}")
+                    return False
 
-            # Load feature columns
+            # Load feature columns - fallback to default if not found
             feature_path = os.path.join(model_dir, "feature_columns.pkl")
-            with open(feature_path, 'rb') as f:
-                self.feature_columns = pickle.load(f)
+            if os.path.exists(feature_path):
+                with open(feature_path, 'rb') as f:
+                    self.feature_columns = pickle.load(f)
+            else:
+                # Create default feature columns based on what we expect
+                self.feature_columns = [
+                    'supertrend', 'volume_sma_5', 'open', 'ema_cross_momentum', 'returns_skew',
+                    'volume_sma_10', 'close', 'ema_cross_signal', 'returns_kurtosis',
+                    'volume_sma_20', 'high', 'ema_8', 'hurst_exponent', 'volume_ratio_current'
+                ][:33]  # Limit to expected number
+                logger.warning(f"Using default feature columns - exact match may not be perfect")
+
+            # Load feature engineering pipeline if available
+            pipeline_path = os.path.join(model_dir, "feature_pipeline.pkl")
+            if os.path.exists(pipeline_path):
+                try:
+                    self.feature_pipeline.load(pipeline_path)
+                    self.pipeline_fitted = True
+                    logger.info(f"Loaded feature pipeline from {pipeline_path}")
+                except Exception as e:
+                    logger.warning(f"Error loading feature pipeline: {e}")
+                    # Reinitialize with default pipeline
+                    self.feature_pipeline = FeaturePipeline(
+                        feature_engine=self.feature_engine,
+                        feature_selector=self.feature_selector,
+                        scaler='robust'
+                    )
 
             # Load models
             self.models = {}
@@ -1053,12 +1230,95 @@ class MLTrainingPipeline:
                 scores = [s for s in validation_scores[model_name] if s != 0.5]  # Exclude error scores
                 if scores:
                     avg_score = np.mean(scores)
-                    logger.info(".4f"
+                    logger.info(f"{model_name} average validation score: {avg_score:.4f}")
             return validation_scores
 
         except Exception as e:
             logger.error(f"Error in walk-forward validation: {e}")
             return {}
+
+    # ==========================================
+    # FEATURE ANALYSIS METHODS
+    # ==========================================
+
+    def get_feature_importance(self) -> Dict[str, float]:
+        """
+        Get feature importance scores from the trained pipeline.
+
+        Returns:
+            Dictionary mapping feature names to importance scores
+        """
+        if not self.pipeline_fitted:
+            logger.warning("Feature pipeline not fitted - no importance scores available")
+            return {}
+
+        try:
+            return self.feature_pipeline.get_feature_importance()
+        except Exception as e:
+            logger.error(f"Error getting feature importance: {e}")
+            return {}
+
+    def get_feature_analysis(self) -> Dict[str, Any]:
+        """
+        Get comprehensive feature analysis from the trained pipeline.
+
+        Returns:
+            Dictionary with feature analysis results
+        """
+        if not self.pipeline_fitted:
+            logger.warning("Feature pipeline not fitted - no analysis available")
+            return {}
+
+        try:
+            return self.feature_pipeline.analyze_pipeline()
+        except Exception as e:
+            logger.error(f"Error analyzing feature pipeline: {e}")
+            return {}
+
+    def print_training_summary(self) -> None:
+        """Print comprehensive training summary including feature analysis."""
+        print("\n" + "=" * 80)
+        print("🤖 ML TRAINING PIPELINE SUMMARY")
+        print("=" * 80)
+
+        print(f"\n📊 Symbol: {self.symbol}")
+        print(f"📅 Training completed: {len(self.models)} models trained")
+
+        # Feature analysis
+        if self.pipeline_fitted:
+            feature_analysis = self.get_feature_analysis()
+            if feature_analysis:
+                print(f"\n🔧 Features: {feature_analysis.get('n_features', 0)} selected")
+                print(f"🏗️  Pipeline: {feature_analysis.get('scaler_type', 'None')} scaling")
+
+                # Top features
+                importance = self.get_feature_importance()
+                if importance:
+                    top_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
+                    print("\n🏆 Top 5 Features:")
+                    for i, (feature, score) in enumerate(top_features, 1):
+                        print(".4f")
+
+                # Feature categories
+                category_analysis = feature_analysis.get('category_analysis', {})
+                if category_analysis:
+                    print("\n📂 Feature Categories:")
+                    for cat, info in sorted(category_analysis.items(), key=lambda x: x[1]['avg_score'], reverse=True):
+                        print(".1f")
+
+        # Model performance
+        if self.model_metadata:
+            print("\n🎯 Model Performance:")
+            for model_name, metrics in self.model_metadata.get('validation_scores', {}).items():
+                if isinstance(metrics, dict) and 'mean' in metrics:
+                    print(".4f")
+                elif isinstance(metrics, list) and metrics:
+                    avg_score = np.mean([m for m in metrics if isinstance(m, (int, float))])
+                    print(".4f")
+
+        print(f"\n💾 Models saved to: models/{self.symbol}/")
+        print("🔄 Ready for inference with ml_signal_enhancer.py")
+        print("\n" + "=" * 80)
 
     # ==========================================
     # MAIN TRAINING PIPELINE
@@ -1107,6 +1367,9 @@ class MLTrainingPipeline:
             logger.info("ML training pipeline completed successfully")
             logger.info(f"Trained {len(self.models)} models with "
                        f"{len(training_data)} samples and {len(self.feature_columns)} features")
+
+            # Print comprehensive training summary
+            self.print_training_summary()
 
             return pipeline_results
 
